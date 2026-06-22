@@ -89,7 +89,7 @@ bool readSceneFromJsonFile(Scene *out, const std::string &file_name)
 
 	return true;
 }
-//sf ÉèÖÃSPHÏµÍ³²ÎÊý
+//sf ï¿½ï¿½ï¿½ï¿½SPHÏµÍ³ï¿½ï¿½ï¿½ï¿½
 inline void defaultInitializeSPHSysPara(SystemParameter &sys_para, Scene *scene)
 {
 	
@@ -215,7 +215,6 @@ HybridSystem::~HybridSystem()
 }
 int tt = 0;
 float time = 0;
-//sf Ä£Äâ¹ý³ÌµÄÖ÷º¯Êý
 void HybridSystem::tick()
 {
     if (!is_running_) return;
@@ -223,7 +222,7 @@ void HybridSystem::tick()
     HighResolutionTimerForWin timer;
     timer.set_start();
     static int step = 0;
-    cudaEvent_t start, end0, end1, end2, end3; //sf ¼ÇÂ¼Ê±¼ä
+    cudaEvent_t start, end0, end1, end2, end3; //sf ï¿½ï¿½Â¼Ê±ï¿½ï¿½
     if (get_detailed_time_)
     {
         CUDA_SAFE_CALL(cudaEventCreate(&start));
@@ -270,7 +269,7 @@ void HybridSystem::tick()
 	time += 0.003;
     if (get_detailed_time_) CUDA_SAFE_CALL(cudaEventRecord(end3));
 
-    //sf ½«Êý¾Ý¸´ÖÆ»Øhost
+    //sf ï¿½ï¿½ï¿½ï¿½ï¿½Ý¸ï¿½ï¿½Æ»ï¿½host
     CUDA_SAFE_CALL(cudaMemcpy(host_buff_.get_buff_list().final_position, device_buff_.get_buff_list().final_position, nump_ * sizeof(float3), cudaMemcpyDeviceToHost));
     CUDA_SAFE_CALL(cudaMemcpy(host_buff_.get_buff_list().color, device_buff_.get_buff_list().color, nump_ * sizeof(uint), cudaMemcpyDeviceToHost));
     CUDA_SAFE_CALL(cudaDeviceSynchronize());
@@ -279,7 +278,7 @@ void HybridSystem::tick()
 
 
 
-    // sf ¼ÆËã¸÷¸ö²½ÖèµÄ×ÜÊ±¼ä
+    // sf ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê±ï¿½ï¿½
     if (get_detailed_time_)
     {
         CUDA_SAFE_CALL(cudaEventElapsedTime(&pre_time_, start, end0));
@@ -304,7 +303,7 @@ void HybridSystem::tick()
     }
 }
 
-//sf ³õÊ¼»¯³¡¾°
+//sf ï¿½ï¿½Ê¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 
 
 void HybridSystem::initializeScene(const std::string &file_name, Scene scene)
@@ -352,7 +351,7 @@ void HybridSystem::initializeScene2(const std::string &file_name)
     //}
 
     //sys_para_.mass = scene.mass;
-    transSysParaToDevice(&sys_para_);  //sf ´«µÝÏµÍ³²ÎÊýÖÁdevice¶Ë
+    transSysParaToDevice(&sys_para_);  //sf ï¿½ï¿½ï¿½ï¿½ÏµÍ³ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½deviceï¿½ï¿½
 
     resetBuffer(scene.recomm_nump);
     particle_interval = scene.interval;
@@ -430,13 +429,13 @@ bool HybridSystem::isRunning()
     return is_running_;
 }
 
-//sf ·µ»ØÁ£×Ó×ÜÊý
+//sf ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 uint HybridSystem::getNumParticles()
 {
     return nump_;
 }
 
-//sf ·µ»ØÁ£×ÓidxµÄfinal_position
+//sf ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½idxï¿½ï¿½final_position
 float3 HybridSystem::getPosition(unsigned int idx)
 {
     //return host_buff_.position[idx] * sys_para_.sim_ratio + sys_para_.sim_origin;

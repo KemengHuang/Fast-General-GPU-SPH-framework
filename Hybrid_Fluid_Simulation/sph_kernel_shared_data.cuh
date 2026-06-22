@@ -30,11 +30,7 @@ const int kNumNeighborCells = 64;
 const int rate = 2;
 
 
-//texture<float4, 1, cudaReadModeElementType> texRef;
-
-//texture<float4, 1, cudaReadModeElementType> texRefe;
-cudaTextureObject_t texRef = 0;
-cudaTextureObject_t texRefe = 0;
+// Texture reads removed: use buff_list.position_d / buff_list.evaluated_velocity directly
 
 struct GrediData
 {
@@ -320,7 +316,7 @@ public:
 			int num_read = remain_nump > readDataSize ? readDataSize : remain_nump;
 			if (num_read > bj) {
 				int read_idx = cell_offset_[curr_cell_index] + offset_in_cell + bj;
-				position_[idx] = tex1Dfetch(texRef, read_idx);
+				position_[idx] = buff_list.position_d[read_idx];
 			}
 			if (remain_nump > readDataSize) offset_in_cell_[idx] += readDataSize;
 			else {
@@ -350,7 +346,7 @@ public:
 				int num_read = remain_nump > readDataSize ? readDataSize : remain_nump;
 				if (num_read > bj) {
 					int read_idx = celloff + offset_in_cell + bj;
-					position_[idx] = tex1Dfetch(texRef, read_idx);
+					position_[idx] = buff_list.position_d[read_idx];
 				}
 				if (remain_nump > readDataSize) offset_in_cell_[idx] += readDataSize;
 				else {
@@ -390,7 +386,7 @@ public:
 				int num_read = remain_nump > readDataSize ? readDataSize : remain_nump;
 				if (num_read > bj) {
 					int read_idx = celloff + offset_in_cell + bj;
-					position_[idx] = tex1Dfetch(texRef, read_idx);
+					position_[idx] = buff_list.position_d[read_idx];
 				}
 				if (remain_nump > readDataSize) offset_in_cell_[idx] += readDataSize;
 				else {
@@ -667,8 +663,8 @@ public:
 			int num_read = remain_nump > readDataSize ? readDataSize : remain_nump;
 			if (num_read > bj) {
 				int read_idx = cell_offset_[curr_cell_index] + offset_in_cell + bj;
-				position_d[idx] = tex1Dfetch(texRef, read_idx);
-				ev_[idx] = tex1Dfetch(texRefe, read_idx);
+				position_d[idx] = buff_list.position_d[read_idx];
+				ev_[idx] = buff_list.evaluated_velocity[read_idx];
 				//         position_d[idx] = buff_list.position_d[read_idx];
 				//         ev_[idx] = buff_list.evaluated_velocity[read_idx];
 			}
@@ -700,8 +696,8 @@ public:
 				int num_read = remain_nump > readDataSize ? readDataSize : remain_nump;
 				if (num_read > bj) {
 					int read_idx = celloff + offset_in_cell + bj;
-					position_d[idx] = tex1Dfetch(texRef, read_idx);
-					ev_[idx] = tex1Dfetch(texRefe, read_idx);
+					position_d[idx] = buff_list.position_d[read_idx];
+					ev_[idx] = buff_list.evaluated_velocity[read_idx];
 					//         position_d[idx] = buff_list.position_d[read_idx];
 					//         ev_[idx] = buff_list.evaluated_velocity[read_idx];
 				}
@@ -743,8 +739,8 @@ public:
 				int num_read = remain_nump > readDataSize ? readDataSize : remain_nump;
 				if (num_read > bj) {
 					int read_idx = celloff + offset_in_cell + bj;
-					position_d[idx] = tex1Dfetch(texRef, read_idx);
-					ev_[idx] = tex1Dfetch(texRefe, read_idx);
+					position_d[idx] = buff_list.position_d[read_idx];
+					ev_[idx] = buff_list.evaluated_velocity[read_idx];
 					//         position_d[idx] = buff_list.position_d[read_idx];
 					//         ev_[idx] = buff_list.evaluated_velocity[read_idx];
 				}

@@ -15,7 +15,7 @@ find_package(Eigen3 REQUIRED)
 find_package(GLEW REQUIRED)
 find_package(GLUT REQUIRED)
 find_package(OpenGL REQUIRED)
-find_package(nlohmann_json REQUIRED)
+find_package(jsoncpp CONFIG REQUIRED)
 find_package(CUDAToolkit REQUIRED)
 
 # CUDA architectures (adjust as needed)
@@ -44,7 +44,7 @@ target_compile_definitions(gsph PRIVATE
 # Link libraries
 target_link_libraries(gsph PRIVATE
     CUDA::cublas CUDA::cusparse CUDA::cusolver CUDA::cudart
-    GLUT::GLUT GLEW::GLEW OpenGL::GL Eigen3::Eigen
+    GLUT::GLUT GLEW::GLEW OpenGL::GL Eigen3::Eigen JsonCpp::JsonCpp
 )
 
 # C++ and CUDA standards

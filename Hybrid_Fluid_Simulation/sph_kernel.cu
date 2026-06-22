@@ -44,7 +44,7 @@ typedef unsigned int uint;
 
 /****************************** Kernel ******************************/
 
-//sf ¼ÆËãdensity Ò»¸öcell
+//sf ï¿½ï¿½ï¿½ï¿½density Ò»ï¿½ï¿½cell
 
 __global__ //__launch_bounds__(kDefaultNumThreadSMS, kDefulatMinBlocksSMS)
 void knInit(ParticleBufferList buff_list, int nump)
@@ -175,7 +175,7 @@ inline void knComputeCellForceSMS(float3 *pres_kn, float3 *vis_kn, SimForSharedD
             (dis_2 - 3 / 4 * (kDevSysPara.kernel_2 - dis_2));
     }
 }
-//sf ¼ÆËãdensity
+//sf ï¿½ï¿½ï¿½ï¿½density
 __global__ //__launch_bounds__(kDefaultNumThreadSMS, kDefulatMinBlocksSMS)
 void knComputeDensitySMS(ParticleBufferList buff_list, int *cell_offset, int *cell_num, BlockTask *block_task)
 {
@@ -235,7 +235,7 @@ void knComputeDensitySMS64(ParticleBufferList buff_list, int *cell_offset, int *
 
     if (self_idx < temp_cell_end)   // initialize self data
     {
-        data.pos = tex1Dfetch(texRef, self_idx);
+        data.pos = buff_list.position_d[self_idx];
     //    data.pos =buff_list.position_d[self_idx];
         data.pos.w = 0;
     }
@@ -345,9 +345,9 @@ void knComputeForceSMS64(ParticleBufferList buff_list, int *cell_offset, int *ce
 
     if (self_idx < temp_cell_end)   // init self data
     {
-        self_data.pos = tex1Dfetch(texRef, self_idx);
+        self_data.pos = buff_list.position_d[self_idx];
      //   self_data.pos = buff_list.position_d[self_idx];
-        self_data.ev = tex1Dfetch(texRefe, self_idx);
+        self_data.ev = buff_list.evaluated_velocity[self_idx];
    //     self_data.ev = buff_list.evaluated_velocity[self_idx];
 
         self_data.grad_color = make_float3(0.0f, 0.0f, 0.0f);
@@ -396,7 +396,7 @@ void knComputeForceSMS64(ParticleBufferList buff_list, int *cell_offset, int *ce
         buff_list.acceleration[self_idx] = total_force + force;
     }
 }
-//sf ¼ÆËã force Ò»¸öcell
+//sf ï¿½ï¿½ï¿½ï¿½ force Ò»ï¿½ï¿½cell
 __device__
 inline void knComputeCellOtherForceSMS(float3 *boundary_force, float3 *vis_kn, pmfCdapSharedData *sdata, CFData *self_data, int read_num)
 {
@@ -421,7 +421,7 @@ inline void knComputeCellOtherForceSMS128(float3 *boundary_force, float3 *vis_kn
 {
 
 }
-//sf ¼ÆËãforce
+//sf ï¿½ï¿½ï¿½ï¿½force
 __global__ __launch_bounds__(kDefaultNumThreadSMS, kDefulatMinBlocksSMS)
 void knComputeOtherForceSMS(ParticleBufferList buff_list, int *cell_offset, int *cell_number, BlockTask *block_task)
 {
@@ -459,7 +459,7 @@ void knManualSetting(ParticleBufferList buff_list, unsigned int nump, int step)
     if (idx >= nump) return;
 }
 
-//sf ¸üÐÂËÙ¶ÈÎ»ÖÃ ÐÂµÄ´¦Àí·½Ê½
+//sf ï¿½ï¿½ï¿½ï¿½ï¿½Ù¶ï¿½Î»ï¿½ï¿½ ï¿½ÂµÄ´ï¿½ï¿½ï¿½ï¿½ï¿½Ê½
 //__global__
 //void knIntegrateVelocity(ParticleBufferList buff_list, unsigned int nump)
 //{
@@ -538,7 +538,7 @@ void knManualSetting(ParticleBufferList buff_list, unsigned int nump, int step)
 //    buff_list.position[idx] = position;
 //    buff_list.velocity[idx] = velocity;
 //    buff_list.evaluated_velocity[idx] = (buff_list.evaluated_velocity[idx] + velocity) / 2;
-//    buff_list.final_position[idx] = position * kDevSysPara.sim_ratio + kDevSysPara.sim_origin;  // sf final_positionËÆºõÊÇ»­ÔÚÆÁÄ»ÉÏµÄÎ»ÖÃ
+//    buff_list.final_position[idx] = position * kDevSysPara.sim_ratio + kDevSysPara.sim_origin;  // sf final_positionï¿½Æºï¿½ï¿½Ç»ï¿½ï¿½ï¿½ï¿½ï¿½Ä»ï¿½Ïµï¿½Î»ï¿½ï¿½
 //}
 
 __global__
@@ -582,8 +582,8 @@ void knIntegrateVelocitySimWave(ParticleBufferList buff_list, unsigned int nump,
 
     if (idx >= nump) return;
 
-    register float4 position = tex1Dfetch(texRef, idx);
-    register float4 eval_vel = tex1Dfetch(texRefe, idx);
+    register float4 position = buff_list.position_d[idx];
+    register float4 eval_vel = buff_list.evaluated_velocity[idx];
     float3 t_velocity = buff_list.velocity[idx];
     float3 accelerate = buff_list.acceleration[idx];// / t_position.w + kDevSysPara.gravity;
     float diff, speed;
@@ -689,8 +689,8 @@ void knIntegrateVelocitySim(ParticleBufferList buff_list, unsigned int nump)
 
 	if (idx >= nump) return;
 
-	register float4 t_position = tex1Dfetch(texRef, idx);
-	register float4 eval_vel = tex1Dfetch(texRefe, idx);
+	register float4 t_position = buff_list.position_d[idx];
+	register float4 eval_vel = buff_list.evaluated_velocity[idx];
 
 	//       register float4 t_position = buff_list.position_d[idx];
 	//       register float4 eval_vel = buff_list.evaluated_velocity[idx];
@@ -750,7 +750,7 @@ void knIntegrateVelocitySim(ParticleBufferList buff_list, unsigned int nump)
 	buff_list.evaluated_velocity[idx] = floathalf4add3(velocity, buff_list.evaluated_velocity[idx]);
 	buff_list.final_position[idx] = float4m3(kDevSysPara.sim_ratio, position) + kDevSysPara.sim_origin;
 }
-//sf ¸üÐÂÎ»ÖÃËÙ¶È  ´óµÄ¹ÌÌå±ß½ç£¬Ô­ÏÈµÄ±ß½ç´¦Àí·½Ê½
+//sf ï¿½ï¿½ï¿½ï¿½Î»ï¿½ï¿½ï¿½Ù¶ï¿½  ï¿½ï¿½Ä¹ï¿½ï¿½ï¿½ß½ç£¬Ô­ï¿½ÈµÄ±ß½ç´¦ï¿½ï¿½ï¿½ï¿½Ê½
 
 __global__
 void knIntegrateVelocityE(ParticleBufferList buff_list, unsigned int nump)
@@ -759,8 +759,8 @@ void knIntegrateVelocityE(ParticleBufferList buff_list, unsigned int nump)
 
 	if (idx >= nump) return;
 
-	register float4 t_position = tex1Dfetch(texRef, idx);
-	register float4 eval_vel = tex1Dfetch(texRefe, idx);
+	register float4 t_position = buff_list.position_d[idx];
+	register float4 eval_vel = buff_list.evaluated_velocity[idx];
 
 	//       register float4 t_position = buff_list.position_d[idx];
 	//       register float4 eval_vel = buff_list.evaluated_velocity[idx];
@@ -859,7 +859,7 @@ void knIntegrateVelocity(ParticleBufferList buff_list, unsigned int nump)
 }
 
 //sf PCISPH-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-//sf ¼ÆËãPCISPHÃÜ¶ÈÎó²îÒò×Ó
+//sf ï¿½ï¿½ï¿½ï¿½PCISPHï¿½Ü¶ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 __device__
 inline int knComputeCellGradWValuesSimple(CdapSharedData *sdata, CDAPData *self_data, int read_num, sumGrad *particle_device, uint self_idx)
 {
@@ -905,14 +905,14 @@ void knComputeGradWValuesSimple(ParticleBufferList buff_list, int *cell_start, i
 
 }
 
-//sf step1 Ô¤²âÎ»ÖÃ
+//sf step1 Ô¤ï¿½ï¿½Î»ï¿½ï¿½
 __global__
 void knPredictPositionAndVelocity(ParticleBufferList buff_list, unsigned int nump)
 {
 
 }
 
-//sf step2 ¼ÆËãÔ¤²âºóµÄÃÜ¶È
+//sf step2 ï¿½ï¿½ï¿½ï¿½Ô¤ï¿½ï¿½ï¿½ï¿½ï¿½Ü¶ï¿½
 __device__
 inline float knComputeCellDensityPredicted(pciCdapSharedData *sdata, pciCDAPData *self_data, int read_num)
 {
@@ -1009,7 +1009,7 @@ void knComputeCorrectivePressureForceTRA(ParticleBufferList buff_list, int *cell
 
 
 
-//sf step3 ÕÒ×î´óÃÜ¶ÈÎó²î
+//sf step3 ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ü¶ï¿½ï¿½ï¿½ï¿½
 __global__
 void GetMaxValue(ParticleBufferList buff_list, float* max_predicted_density, unsigned int nump)
 {
@@ -1033,7 +1033,7 @@ void GetMaxValue(ParticleBufferList buff_list, float* max_predicted_density, uns
     }
 }
 
-//sf step4 ¼ÆËãpressure²úÉúµÄÁ¦
+//sf step4 ï¿½ï¿½ï¿½ï¿½pressureï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 __device__
 inline void knComputeCellCorrectivePressureForce(float3 *pres_kn, CfkSharedData *sdata, pciCFData *self_data, int read_num)
 {
@@ -1056,7 +1056,7 @@ inline void knComputeCellCorrectivePressureForce128(float3 *pres_kn, CfkSharedDa
 
 
 }
-//sf ¼ÆËãforce
+//sf ï¿½ï¿½ï¿½ï¿½force
 __global__ __launch_bounds__(kDefaultNumThreadSMS, kDefulatMinBlocksSMS)
 void knComputeCorrectivePressureForce(ParticleBufferList buff_list, int *cell_offset, int *cell_nump, BlockTask *block_task)
 {
@@ -1119,26 +1119,14 @@ void releaseKernel()
     CUDA_SAFE_CALL(cudaEventDestroy(sms_force_event));
 }
 
-//sf host¼ÆËãdensityµÄ×Üº¯Êý
+//sf hostï¿½ï¿½ï¿½ï¿½densityï¿½ï¿½ï¿½Üºï¿½ï¿½ï¿½
 void computeDensitySMS64(ParticleBufferList buff_list, int *cell_offset, int *cell_num, BlockTask *block_task, int num_block)
 {
     if (num_block <= 0) return;
     int num_blocks = ceil_int(num_block, 2);
     int num_thread = 64;
-    cudaCreateTextureObject(&texRef,
-        &(cudaResourceDesc){
-        .resType = cudaResourceTypeLinear,
-            .res.linear = { ptr, cudaCreateChannelDesc<float4>(), 100 * sizeof(float4) }
-    },
-        & (cudaTextureDesc) {
-        .readMode = cudaReadModeElementType
-    },
-        NULL);
-    //cudaBindTexture(0, texRef, buff_list.position_d);
-    cudaCreateTextureObject(&texRef, &(cudaResourceDesc){cudaResourceTypeLinear, { .linear = {ptr,cudaCreateChannelDesc<float4>(),100 * sizeof(float4)} }}, & (cudaTextureDesc) { .readMode = cudaReadModeElementType }, NULL);
     knComputeDensitySMS64 << <num_blocks, num_thread >> >(buff_list, cell_offset, cell_num, block_task);
 
-    cudaUnbindTexture(texRef);
 
 }
 
@@ -1165,7 +1153,7 @@ void knComputeCellDensityTRA(ParticleBufferList &buff_list, CDAPData *self_data,
 
     for (size_t i = start_idx; i < end_idx; ++i)
     {
-        float4 neighbor_pos = tex1Dfetch(texRef, i);
+        float4 neighbor_pos = buff_list.position_d[i];
         //      float4 neighbor_pos = buff_list.position_d[i];
 
 
@@ -1186,7 +1174,7 @@ void knComputeCellDensityTRA9(ParticleBufferList &buff_list, CDAPData *self_data
     int end_idx = cell_offset + cell_num;
     for (size_t i = cell_offset; i < end_idx; ++i)
     {
-        float4 neighbor_pos = tex1Dfetch(texRef, i);
+        float4 neighbor_pos = buff_list.position_d[i];
       //  float4 neighbor_pos = buff_list.position_d[i];
 
 
@@ -1235,7 +1223,7 @@ void knComputeDensityTRA(ParticleBufferList buff_list, int *cell_offset, int *ce
     if (self_idx >= range.end) return;
 
     register CDAPData self_data;
-    self_data.pos = tex1Dfetch(texRef, self_idx);
+    self_data.pos = buff_list.position_d[self_idx];
     //    self_data.pos = buff_list.position_d[self_idx];
 
     self_data.pos.w = 0;
@@ -1305,9 +1293,7 @@ void computeDensityTRA(ParticleBufferList buff_list, ParticleIdxRange range, int
     int num_thread = kDefaultNumThreadTRA;
     int num_block = ceil_int(total_thread, num_thread);
 
-    cudaBindTexture(0, texRef, buff_list.position_d);
     knComputeDensityTRA << <num_block, num_thread >> >(buff_list, cell_offset, cell_num, range);
-    cudaUnbindTexture(texRef);
 }
 
 
@@ -1340,8 +1326,8 @@ void knComputeCellForceTRA(float3 *pres_kn, float3 *vis_kn, ParticleBufferList &
 
     for (size_t i = start_idx; i < end_idx; ++i)
     {
-             register float4 neighbor_pos = tex1Dfetch(texRef, i);
-             register float4 neighbor_ev = tex1Dfetch(texRefe, i);
+             register float4 neighbor_pos = buff_list.position_d[i];
+             register float4 neighbor_ev = buff_list.evaluated_velocity[i];
 
    //     register float4 neighbor_pos = buff_list.position_d[i];
    //     register float4 neighbor_ev = buff_list.evaluated_velocity[i];
@@ -1388,8 +1374,8 @@ void knComputeCellForceTRA9(float3 *pres_kn, float3 *vis_kn, ParticleBufferList 
     int end_idx = cell_offset + cell_num;
     for (size_t i = cell_offset; i < end_idx; ++i)
     {
-             register float4 neighbor_pos = tex1Dfetch(texRef, i);
-             register float4 neighbor_ev = tex1Dfetch(texRefe, i);
+             register float4 neighbor_pos = buff_list.position_d[i];
+             register float4 neighbor_ev = buff_list.evaluated_velocity[i];
 
    //     register float4 neighbor_pos = buff_list.position_d[i];
    //     register float4 neighbor_ev = buff_list.evaluated_velocity[i];
@@ -1446,8 +1432,8 @@ void knComputeForceTRA(ParticleBufferList buff_list, int *cell_offset, int *cell
     if (self_idx >= range.end) return;
 
     register CFData self_data;
-    self_data.pos = tex1Dfetch(texRef, self_idx);
-    self_data.ev = tex1Dfetch(texRefe, self_idx);
+    self_data.pos = buff_list.position_d[self_idx];
+    self_data.ev = buff_list.evaluated_velocity[self_idx];
 
     //    self_data.pos = buff_list.position_d[self_idx];
     //    self_data.ev = buff_list.evaluated_velocity[self_idx];
@@ -1564,8 +1550,6 @@ void computeForceTRA(ParticleBufferList buff_list, ParticleIdxRange range, int *
     int num_thread = kDefaultNumThreadTRA;
     int num_block = ceil_int(total_thread, num_thread);
 
-    cudaBindTexture(0, texRef, buff_list.position_d);
-    cudaBindTexture(0, texRefe, buff_list.evaluated_velocity);
     knComputeForceTRA << <num_block, num_thread >> >(buff_list, cell_offset, cell_num, range);
 
 }
@@ -1601,8 +1585,6 @@ void computeForceSMS64(ParticleBufferList buff_list, int *cell_offset, int *cell
     if (num_block <= 0) return;
     int num_blocks = ceil_int(num_block, 2);
     int num_thread = 64;
-    cudaBindTexture(0, texRef, buff_list.position_d);
-    cudaBindTexture(0, texRefe, buff_list.evaluated_velocity);
   
     knComputeForceSMS64 << <num_blocks, num_thread >> >(buff_list, cell_offset, cell_num, block_task);
   
@@ -1623,7 +1605,7 @@ void knComputeOtherForceTRAS(ParticleBufferList buff_list, int *cell_offset, int
 {
 
 }
-//sf host¼ÆËãforceµÄ×Üº¯Êý
+//sf hostï¿½ï¿½ï¿½ï¿½forceï¿½ï¿½ï¿½Üºï¿½ï¿½ï¿½
 void computeOtherForceSMS(ParticleBufferList buff_list, int *cell_offset, int *cell_number, BlockTask *block_task, int num_block)
 {
     if (num_block <= 0) return;
@@ -1717,7 +1699,7 @@ void kncomputeDensityHybrid128n(int *cell_offset_M, ParticleIdxRange range, Part
         self_idx = cindex[self_idx];
 
         register CDAPData self_data;
-        self_data.pos = tex1Dfetch(texRef, self_idx);
+        self_data.pos = buff_list.position_d[self_idx];
   //      self_data.pos =buff_list.position_d[self_idx];
         self_data.pos.w = 0;
         ushort3 cell_posc = ParticlePos2CellPosM(self_data.pos, kDevSysPara.cell_size);
@@ -1821,7 +1803,7 @@ void kncomputeDensityHybrid128n(int *cell_offset_M, ParticleIdxRange range, Part
 
         if (self_idx < temp_cell_end)   // initialize self data
         {
-            data.pos = tex1Dfetch(texRef, self_idx);
+            data.pos = buff_list.position_d[self_idx];
         //    data.pos = buff_list.position_d[self_idx];
             data.pos.w = 0;
         }
@@ -1868,9 +1850,9 @@ void kncomputeForceHybrid128n(int *cell_offset_M,ParticleIdxRange range, Particl
         self_idx = cindex[self_idx];
 
         register CFData self_data;
-        self_data.pos = tex1Dfetch(texRef, self_idx);
+        self_data.pos = buff_list.position_d[self_idx];
      //   self_data.pos = buff_list.position_d[self_idx];
-        self_data.ev = tex1Dfetch(texRefe, self_idx); 
+        self_data.ev = buff_list.evaluated_velocity[self_idx]; 
    //     self_data.ev = buff_list.evaluated_velocity[self_idx];
        
 
@@ -1993,9 +1975,9 @@ void kncomputeForceHybrid128n(int *cell_offset_M,ParticleIdxRange range, Particl
         if (self_idx < temp_cell_end)   // init self data
         {
 			
-            self_data.pos = tex1Dfetch(texRef, self_idx);
+            self_data.pos = buff_list.position_d[self_idx];
        //     self_data.pos = buff_list.position_d[self_idx];
-            self_data.ev = tex1Dfetch(texRefe, self_idx);
+            self_data.ev = buff_list.evaluated_velocity[self_idx];
         //    self_data.ev = buff_list.evaluated_velocity[self_idx];
             self_data.grad_color = make_float3(0.0f, 0.0f, 0.0f);
             self_data.lplc_color = 0.0f;
@@ -2056,10 +2038,8 @@ void computeDensityHybrid128n(int *cell_offset_M, ParticleIdxRange range, Partic
         number_blocks += bt_offset;
     }
     if (number_blocks <= 0) return;
-    cudaBindTexture(0, texRef, buff_list_n.position_d);
 //	std::cout << ceil_int(num_block, 2) << "               " << num_block << "         asfasdfasfasdfafsd" << std::endl;
 	kncomputeDensityHybrid128n << <number_blocks, num_thread >> >(cell_offset_M, range, buff_list_n, cindex, cell_offset, cell_num, block_task, bt_offset);
-    cudaUnbindTexture(texRef);
 }
 
 void computeForceHybrid128n(int *cell_offset_M, ParticleIdxRange range, ParticleBufferList buff_list_n, int* cindex, int *cell_offset, int *cell_num, BlockTask *block_task, int num_block){
@@ -2072,8 +2052,6 @@ void computeForceHybrid128n(int *cell_offset_M, ParticleIdxRange range, Particle
         number_blocks += bt_offset;
     }
     if (number_blocks <= 0) return;
-    cudaBindTexture(0, texRef, buff_list_n.position_d);
-    cudaBindTexture(0, texRefe, buff_list_n.evaluated_velocity);
 	kncomputeForceHybrid128n << <number_blocks, num_thread >> >(cell_offset_M,range, buff_list_n, cindex, cell_offset, cell_num, block_task, bt_offset);
 }
 
@@ -2137,7 +2115,7 @@ void manualSetting(ParticleBufferList buff_list, int nump, int step)
     knManualSetting << <num_block, num_thread >> >(buff_list, nump, step);
 }
 
-//sf ¸üÐÂÎ»ÖÃËÙ¶È
+//sf ï¿½ï¿½ï¿½ï¿½Î»ï¿½ï¿½ï¿½Ù¶ï¿½
 void advance(ParticleBufferList buff_list, int nump)
 {
     int num_thread = kDefaultNumThreadTRA;
@@ -2145,8 +2123,6 @@ void advance(ParticleBufferList buff_list, int nump)
 
 	//knIntegrateVelocitySim << <num_block, num_thread >> >(buff_list, nump);
     knIntegrateVelocityE << <num_block, num_thread >> >(buff_list, nump);
-    cudaUnbindTexture(texRef);
-    cudaUnbindTexture(texRefe);
 
 
 }
@@ -2156,8 +2132,6 @@ void advanceWave(ParticleBufferList buff_list, int nump, float time){
 
 
     knIntegrateVelocitySimWave << <num_block, num_thread >> >(buff_list, nump, time);
-    cudaUnbindTexture(texRef);
-    cudaUnbindTexture(texRefe);
 }
 
 void advanceMix(ParticleBufferList buff_list, int nump)
@@ -2178,7 +2152,7 @@ void advancePCI(ParticleBufferList buff_list, int nump)
     //CUDA_SAFE_CALL(cudaStreamWaitEvent(sms_stream, tra_force_event, 0));
     knIntegrateVelocity << <num_block, num_thread >> >(buff_list, nump);
 }
-//sf host¼ÆËãforceµÄ×Üº¯Êý
+//sf hostï¿½ï¿½ï¿½ï¿½forceï¿½ï¿½ï¿½Üºï¿½ï¿½ï¿½
 void computeGradWValuesSimpleSMS(ParticleBufferList buff_list, int *cell_start, int *cell_end, BlockTask *block_task, int num_block, sumGrad *particle_device)
 {
     if (num_block <= 0) return;
@@ -2221,7 +2195,7 @@ void find_max_P(int blocks, int tds, sumGrad *id_value, int numbers)
 }
 
 
-//sf PCISPHÔ¤²âÐ£ÑéÖ÷º¯Êý----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+//sf PCISPHÔ¤ï¿½ï¿½Ð£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 void predictionCorrectionStepHybrid128(ParticleBufferList buff_list, int *cell_offset, int *cell_num, BlockTask *block_task, int num_block,
                                        float pcisph_density_factor, unsigned int nump, int pcisph_min_loop, int pcisph_max_loop, float	pcisph_max_density_error_allowed, ParticleIdxRange range){
     if (nump <= 0) return;
@@ -2235,7 +2209,7 @@ void predictionCorrectionStepHybrid128(ParticleBufferList buff_list, int *cell_o
     {
 
 
-        predictPositionAndVelocity(buff_list, nump);   //sf ÓÐ¹ÌÒº½»»¥²½Öè
+        predictPositionAndVelocity(buff_list, nump);   //sf ï¿½Ð¹ï¿½Òºï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
         max_predicted_density = 1000.0f;
 
         //computePredictedDensityAndPressureTRA(buff_list, cell_offset, cell_num, range, pcisph_density_factor);
@@ -2274,9 +2248,9 @@ void predictionCorrectionStepHybrid128n(ParticleBufferList buff_list_n, int *cin
     {
 
 
-        predictPositionAndVelocity(buff_list_n, nump);   //sf ÓÐ¹ÌÒº½»»¥²½Öè
+        predictPositionAndVelocity(buff_list_n, nump);   //sf ï¿½Ð¹ï¿½Òºï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 
-        //predictPositionAndVelocity(buff_list_o, nump);   //sf ÓÐ¹ÌÒº½»»¥²½Öè
+        //predictPositionAndVelocity(buff_list_o, nump);   //sf ï¿½Ð¹ï¿½Òºï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
         max_predicted_density = 1000.0f;
 
         //computePredictedDensityAndPressureTRA(buff_list, cell_offset, cell_num, range, pcisph_density_factor);
@@ -2319,7 +2293,7 @@ void predictionCorrectionStepHybrid(ParticleBufferList buff_list, int *cell_offs
     {
 
 
-        predictPositionAndVelocity(buff_list, nump);   //sf ÓÐ¹ÌÒº½»»¥²½Öè
+        predictPositionAndVelocity(buff_list, nump);   //sf ï¿½Ð¹ï¿½Òºï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
         max_predicted_density = 1000.0f;
 
         //computePredictedDensityAndPressureTRA(buff_list, cell_offset, cell_num, range, pcisph_density_factor);
@@ -2360,8 +2334,8 @@ void predictionCorrectionStepTRAS(ParticleBufferList buff_list, int *cell_offset
     {
         //printf("In PCISPH Loop \n");
 
-        //      predictPositionAndVelocity(num_block, buff_list, nump, cell_start, cell_end, block_task, num_block);   //sf ÓÐ¹ÌÒº½»»¥²½Öè
-        predictPositionAndVelocity(buff_list, nump);   //sf ÓÐ¹ÌÒº½»»¥²½Öè
+        //      predictPositionAndVelocity(num_block, buff_list, nump, cell_start, cell_end, block_task, num_block);   //sf ï¿½Ð¹ï¿½Òºï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+        predictPositionAndVelocity(buff_list, nump);   //sf ï¿½Ð¹ï¿½Òºï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
         max_predicted_density = 1000.0f;
 
         computePredictedDensityAndPressureTRAS(buff_list, cell_offset, cell_number, block_task, num_block, pcisph_density_factor);
@@ -2395,8 +2369,8 @@ void predictionCorrectionStepSMS(ParticleBufferList buff_list, int *cell_offset,
     {
         //printf("In PCISPH Loop \n");
 
-        //      predictPositionAndVelocity(num_block, buff_list, nump, cell_start, cell_end, block_task, num_block);   //sf ÓÐ¹ÌÒº½»»¥²½Öè
-        predictPositionAndVelocity(buff_list, nump);   //sf ÓÐ¹ÌÒº½»»¥²½Öè
+        //      predictPositionAndVelocity(num_block, buff_list, nump, cell_start, cell_end, block_task, num_block);   //sf ï¿½Ð¹ï¿½Òºï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+        predictPositionAndVelocity(buff_list, nump);   //sf ï¿½Ð¹ï¿½Òºï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
         max_predicted_density = 1000.0f;
 
         computePredictedDensityAndPressureSMS(buff_list, cell_offset, cell_number, block_task, num_block, pcisph_density_factor);
@@ -2432,8 +2406,8 @@ void predictionCorrectionStepSMS64(ParticleBufferList buff_list, int *cell_offse
     {
         //printf("In PCISPH Loop \n");
 
-        //      predictPositionAndVelocity(num_block, buff_list, nump, cell_start, cell_end, block_task, num_block);   //sf ÓÐ¹ÌÒº½»»¥²½Öè
-        predictPositionAndVelocity(buff_list, nump);   //sf ÓÐ¹ÌÒº½»»¥²½Öè
+        //      predictPositionAndVelocity(num_block, buff_list, nump, cell_start, cell_end, block_task, num_block);   //sf ï¿½Ð¹ï¿½Òºï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+        predictPositionAndVelocity(buff_list, nump);   //sf ï¿½Ð¹ï¿½Òºï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
         max_predicted_density = 1000.0f;
 
         computePredictedDensityAndPressureSMS64(buff_list, cell_offset, cell_number, block_task, num_block, pcisph_density_factor);
@@ -2469,8 +2443,8 @@ void predictionCorrectionStepTRA(ParticleBufferList buff_list, int *cell_offset,
     {
         //printf("In PCISPH Loop \n");
 
-        //      predictPositionAndVelocity(num_block, buff_list, nump, cell_start, cell_end, block_task, num_block);   //sf ÓÐ¹ÌÒº½»»¥²½Öè
-        predictPositionAndVelocity(buff_list, numpp);   //sf ÓÐ¹ÌÒº½»»¥²½Öè
+        //      predictPositionAndVelocity(num_block, buff_list, nump, cell_start, cell_end, block_task, num_block);   //sf ï¿½Ð¹ï¿½Òºï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+        predictPositionAndVelocity(buff_list, numpp);   //sf ï¿½Ð¹ï¿½Òºï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
         max_predicted_density = 1000.0f;
 
         computePredictedDensityAndPressureTRA(buff_list, cell_offset, cell_num, range, pcisph_density_factor);
@@ -2733,7 +2707,7 @@ float computeDensityErrorFactorTRA(float mass, float rest_density, float time_st
 
 
 
-    cudaMemcpy(particle_host, particle_device, sizeof(sumGrad)*nump, cudaMemcpyDeviceToHost);//´«»ØÖ÷»ú¶Ë
+    cudaMemcpy(particle_host, particle_device, sizeof(sumGrad)*nump, cudaMemcpyDeviceToHost);//ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     printf("CUDA_SAFE_CALL(cudaMalloc((void**)&particle_device, nump * sizeof(sumGrad))): %.20f\n", particle_host[0].sumGradWDot);
 
     for (uint id = 0; id < nump; id++) {
