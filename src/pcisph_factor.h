@@ -10,7 +10,7 @@
 
 namespace sph
 {
-	float computeDensityErrorFactorSMS(float mass, float rest_density, float time_step, ParticleBufferList buff_list, int *cell_start, int *cell_end, BlockTask *block_task, int num_block, uint nump);  //返回一个float型的 pcisph密度误差因子
+	float computeDensityErrorFactorSMS(float mass, float rest_density, float time_step, ParticleBufferList buff_list, int *cell_start, int *cell_end, BlockTask *block_task, int num_block, uint nump);  // returns the PCISPH density-error factor
 
 	//void computeGradWValuesSimple();
 	

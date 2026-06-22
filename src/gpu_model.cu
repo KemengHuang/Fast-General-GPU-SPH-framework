@@ -19,9 +19,9 @@ namespace gpu_model
 
 using namespace sph;
 
-const char *kLatencyFileName = "insts_latency.json";
-const char *kPTXStatisticsFileNameSMS = "sph_sms_arti_block_statistics.json";
-const char *kPTXStatisticsFileNameTRA = "sph_tra_arti_block_statistics.json";
+const char *kLatencyFileName = "assets/insts_latency.json";
+const char *kPTXStatisticsFileNameSMS = "assets/sph_sms_arti_block_statistics.json";
+const char *kPTXStatisticsFileNameTRA = "assets/sph_tra_arti_block_statistics.json";
 const char *kFunNameDensitySMS = "_ZN3sph19knComputeDensitySMSENS_18ParticleBufferListEPiS1_PNS_9BlockTaskE";
 const char *kFunNameForceSMS = "_ZN3sph17knComputeForceSMSENS_18ParticleBufferListEPiS1_PNS_9BlockTaskE";
 const char *kFunNameDensityTRA = "_Z21knBmComputeDensityTRAN3SPH18ParticleBufferListEPjS1_jS1_";

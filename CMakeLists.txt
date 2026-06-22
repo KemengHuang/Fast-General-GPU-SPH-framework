@@ -11,7 +11,6 @@ project(Hybrid_Fluid_Simulation LANGUAGES CXX CUDA)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Find dependencies
-find_package(Eigen3 REQUIRED)
 find_package(GLEW REQUIRED)
 find_package(GLUT REQUIRED)
 find_package(OpenGL REQUIRED)
@@ -26,25 +25,33 @@ endif()
 # Executable
 add_executable(gsph)
 
-# Sources – prefer explicit list, but GLOB is okay for small projects
+# Sources – recursively collect all implementation and header files under src/ and third_party/.
 file(GLOB_RECURSE gsph_SOURCES CONFIGURE_DEPENDS
-    "Hybrid_Fluid_Simulation/*.cu" "Hybrid_Fluid_Simulation/*.cpp")
+    "src/*.cpp"
+    "src/*.cu"
+    "src/*.h"
+    "src/*.cuh"
+    "third_party/lodepng/*.cpp"
+    "third_party/lodepng/*.h"
+)
 target_sources(gsph PRIVATE ${gsph_SOURCES})
 
 # Include directories
-target_include_directories(gsph PRIVATE "Hybrid_Fluid_Simulation/")
-# CUDAToolkit includes are automatic via target_link_libraries
-
-# Definitions for asset/output paths
-target_compile_definitions(gsph PRIVATE
-    gsph_ASSETS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/Assets"
-    gsph_OUTPUT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/Output"
+#   src/            project headers
+#   third_party/    lodepng (used by gl_texture.h)
+target_include_directories(gsph PRIVATE
+    src/
+    third_party/lodepng/
 )
 
 # Link libraries
+#   Only CUDA::cudart is required; cublas/cusparse/cusolver and Eigen are unused.
 target_link_libraries(gsph PRIVATE
-    CUDA::cublas CUDA::cusparse CUDA::cusolver CUDA::cudart
-    GLUT::GLUT GLEW::GLEW OpenGL::GL Eigen3::Eigen JsonCpp::JsonCpp
+    CUDA::cudart
+    GLUT::GLUT
+    GLEW::GLEW
+    OpenGL::GL
+    JsonCpp::JsonCpp
 )
 
 # C++ and CUDA standards
@@ -68,7 +75,7 @@ target_compile_options(gsph PRIVATE
     >
 )
 
-# MSVC‑specific CUDA flags (disable noisy warnings)
+# MSVC-specific CUDA flags (disable noisy warnings)
 if(MSVC)
     target_compile_options(gsph PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:
@@ -88,24 +95,15 @@ source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${gsph_SOURCES})
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT gsph)
 set_property(TARGET gsph PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "$(OutDir)")
 
-# Copy runtime assets next to the executable so F5 / double-click work
-set(gsph_RUNTIME_ASSETS
-    Hybrid_Fluid_Simulation/scene_default.json
-    Hybrid_Fluid_Simulation/scene_default1.json
-    Hybrid_Fluid_Simulation/ball32.png
-    Hybrid_Fluid_Simulation/insts_latency.json
-    Hybrid_Fluid_Simulation/sph_tra_arti_block_statistics.json
-    Hybrid_Fluid_Simulation/sph_sms_arti_block_statistics.json
-)
-foreach(asset ${gsph_RUNTIME_ASSETS})
-    add_custom_command(TARGET gsph POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${CMAKE_CURRENT_SOURCE_DIR}/${asset}
-            $<TARGET_FILE_DIR:gsph>/
-    )
-endforeach()
+# Copy runtime assets next to the executable so F5 / double-click work.
+# Assets are copied into an assets/ subfolder so the hard-coded paths in the source work.
 add_custom_command(TARGET gsph POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
-        ${CMAKE_CURRENT_SOURCE_DIR}/Hybrid_Fluid_Simulation/Shader
-        $<TARGET_FILE_DIR:gsph>/Shader
+        ${CMAKE_CURRENT_SOURCE_DIR}/assets
+        $<TARGET_FILE_DIR:gsph>/assets
+)
+add_custom_command(TARGET gsph POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_CURRENT_SOURCE_DIR}/shaders
+        $<TARGET_FILE_DIR:gsph>/shaders
 )

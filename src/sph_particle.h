@@ -63,7 +63,7 @@ struct mixPressure{
 
 
 
-//sf add 粒子状态
+// particle state
 enum condition { FLUID, SOLID,  };
 
 
@@ -138,7 +138,7 @@ struct ParticleBufferList
 
     unsigned int* color;
 	//sf others-------------------------------
-	condition*	phase;             //sf 粒子种类
+	condition*	phase;             // particle phase/type
 
 
 

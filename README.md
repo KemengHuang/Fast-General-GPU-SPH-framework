@@ -1,22 +1,97 @@
 # Fast-SPH-framework
-This framework represents a fast general implementation of GPU SPH method utilizing the uniform grid approach.
 
-DESCRIPTION
-===========
-This project is the source code of ["Novel Hierarchical Strategies for SPH-centric Algorithms on GPGPU"](https://doi.org/10.1016/j.gmod.2020.101088)
-and ["A General Novel Parallel Framework for SPH-centric Algorithms"](https://dl.acm.org/doi/10.1145/3321360). 
+This framework is a fast, general implementation of a GPU SPH method utilizing a uniform grid.
 
-This project offers fast optimization strategies based on uniform grid. When compared to a well-optimized GPU SPH method based on the uniform grid, the method proposed in the papers demonstrates a significant speed improvement of up to 3.5 times. As a result, it serves as an excellent benchmark for conducting further research on GPU SPH and facilitates meaningful comparisons.
+## Description
 
+This project is the source code of
+["Novel Hierarchical Strategies for SPH-centric Algorithms on GPGPU"](https://doi.org/10.1016/j.gmod.2020.101088)
+and
+["A General Novel Parallel Framework for SPH-centric Algorithms"](https://dl.acm.org/doi/10.1145/3321360).
 
-Source code contributor: [Kemeng Huang](https://kemenghuang.github.io), Jiming Ruan
+It offers fast optimization strategies based on a uniform grid. Compared to a well-optimized GPU SPH method using the uniform grid, the proposed approach achieves a speed improvement of up to 3.5x. It therefore serves as an excellent benchmark for further research on GPU SPH and for meaningful comparisons.
 
-**Note: this software is released under the MPLv2.0 license. For commercial use, please email authors for negotiation.**
+Source code contributors: [Kemeng Huang](https://kemenghuang.github.io), Jiming Ruan.
 
-## BibTex 
+**Note: this software is released under the MPLv2.0 license. For commercial use, please email the authors for negotiation.**
 
-Please cite the following papers if it helps. 
+## Build & Run
 
+### Requirements
+
+- Windows 10/11
+- Visual Studio 2022 Community (or higher)
+- CUDA Toolkit 12.x
+- CMake >= 3.18
+- vcpkg with the following packages installed:
+  ```bash
+  vcpkg install glew freeglut jsoncpp --triplet x64-windows
+  ```
+
+### Configure
+
+Open a terminal in the repository root and run:
+
+```bash
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+```
+
+Make sure CMake can find vcpkg, e.g. by setting `CMAKE_TOOLCHAIN_FILE`:
+
+```bash
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 ^
+  -DCMAKE_TOOLCHAIN_FILE=C:/path/to/vcpkg/scripts/buildsystems/vcpkg.cmake
+```
+
+### Build
+
+Open `build/Hybrid_Fluid_Simulation.sln` in Visual Studio and build the `Release` target,
+or build from the command line:
+
+```bash
+cmake --build build --config Release
+```
+
+The executable will be produced at `build/Release/gsph.exe`.
+
+### Run
+
+CMake copies the required runtime assets (`assets/`) and shaders (`shaders/`) to the output
+directory automatically. Launch the simulation with:
+
+```bash
+build/Release/gsph.exe
+```
+
+The default scene (`assets/scene_default.json`) generates ~3.94 million particles. For faster
+iteration during development, create a smaller scene file and change `kDefaultSceneFileName` in
+`src/sph_hybrid_system.cpp`, or add a command-line argument (not implemented yet).
+
+### Controls
+
+- `Space` – pause / resume
+- `w`/`s` – move forward / backward
+- `a`/`d` – move left / right
+- `q`/`e` – move down / up
+- `o`/`u` – increase / decrease particle point size
+- `/` – toggle screenshot capture to `screenshot/`
+
+## Project Layout
+
+```
+.
+├── assets/          runtime JSON scenes and textures
+├── shaders/         GL vertex/fragment shaders
+├── src/             source code
+│   └── cuda_prescan/    prefix-sum helpers included by sph_arrangement.cu
+├── third_party/     third-party code (lodepng)
+├── CMakeLists.txt
+└── README.md
+```
+
+## BibTex
+
+Please cite the following papers if this work helps your research.
 
 ```
 @article{HUANG2020101088,
@@ -31,7 +106,6 @@ Please cite the following papers if it helps.
   author = {Kemeng Huang and Zipeng Zhao and Chen Li and Changbo Wang and Hong Qin}
 }
 ```
-
 
 ```
 @article{10.1145/3321360,

@@ -1,28 +1,21 @@
 //
-// save_screen.h
-// Heterogeneous_SPH
-//
-// created by ruanjm on 03/10/15
-// Copyright (c) 2015 ruanjm. All right reserved.
+// screenshot.cpp
 //
 
-#ifndef _SAVE_SCREEN_H
-#define _SAVE_SCREEN_H
+#include "screenshot.h"
 
-#include <GL\GL.h>
 #include <windows.h>
-#include <string>
-
-#define BITMAP_ID 0x4D42        // the universal bitmap ID  
-
-BITMAPINFOHEADER    bitmapInfoHeader;
+#include <GL/gl.h>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 bool WriteBitmapFile(int width, int height, const std::string &file_name, unsigned char *bitmapData)
-{ 
+{
     BITMAPFILEHEADER bitmapFileHeader;
     memset(&bitmapFileHeader, 0, sizeof(BITMAPFILEHEADER));
     bitmapFileHeader.bfSize = sizeof(BITMAPFILEHEADER);
-    bitmapFileHeader.bfType = 0x4d42;   //BM  
+    bitmapFileHeader.bfType = 0x4d42;   // BM
     bitmapFileHeader.bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
 
     BITMAPINFOHEADER bitmapInfoHeader;
@@ -35,9 +28,8 @@ bool WriteBitmapFile(int width, int height, const std::string &file_name, unsign
     bitmapInfoHeader.biCompression = BI_RGB;
     bitmapInfoHeader.biSizeImage = width * abs(height) * 3;
 
-    //////////////////////////////////////////////////////////////////////////  
-    FILE * filePtr;        
-    unsigned char tempRGB;  
+    FILE * filePtr;
+    unsigned char tempRGB;
     int imageIdx;
 
     for (imageIdx = 0; imageIdx < (int)bitmapInfoHeader.biSizeImage; imageIdx += 3)
@@ -54,9 +46,7 @@ bool WriteBitmapFile(int width, int height, const std::string &file_name, unsign
     }
 
     fwrite(&bitmapFileHeader, sizeof(BITMAPFILEHEADER), 1, filePtr);
-
     fwrite(&bitmapInfoHeader, sizeof(BITMAPINFOHEADER), 1, filePtr);
-
     fwrite(bitmapData, bitmapInfoHeader.biSizeImage, 1, filePtr);
 
     fclose(filePtr);
@@ -74,6 +64,3 @@ void SaveScreenShot(int width, int height, const std::string &file_name)
 
     free(screen_data);
 }
-
-
-#endif/*_SAVE_SCREEN_H*/

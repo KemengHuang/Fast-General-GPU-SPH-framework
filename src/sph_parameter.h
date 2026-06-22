@@ -14,7 +14,7 @@
 namespace sph
 {
 
-//sf SPH系统参数
+// SPH system parameters
 struct SystemParameter
 {
     float3      world_size;
@@ -71,7 +71,7 @@ struct SystemParameter
 
 	float		spacing_fluid;
 
-	//sf pcisph自加=========================================
+	// PCISPH-specific parameters
 	int			pcisph_min_loops;
 	int			pcisph_max_loops;
 	float		pcisph_max_density_error_allowed;

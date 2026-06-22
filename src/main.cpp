@@ -2,11 +2,11 @@
 #include <GL\freeglut.h>
 #include <sstream>
 #include <cuda_runtime.h>
-#include "save_screen.h"
+#include "screenshot.h"
 #include "sph_timer.h"
 #include "sph_data.h"
 #include "sph_hybrid_system.h"
-#include "gl_main_header.h"
+#include "app.h"
 
 //#pragma comment(lib, "glew32.lib") 
 
@@ -15,14 +15,7 @@ sph::HybridSystem *sph_system;
 Timer *sph_timer;
 char *window_title;
 
-GLuint v;
-GLuint f;
-GLuint p;
-
 Vector4DF	light[2], light_to[2];				// Light stuff
-
-static const std::string scale_density_filename = "scale_d.txt";
-static const std::string scale_force_filename = "scale_f.txt";
 
 bool screenshot = false;
 
@@ -60,81 +53,6 @@ bool init_cuda(void)
 
     printf("CUDA initialized.\n");
     return true;
-}
-
-void set_shaders()
-{
-    char *vs = NULL;
-    char *fs = NULL;
-
-    vs = (char *)malloc(sizeof(char) * 10000);
-    fs = (char *)malloc(sizeof(char) * 10000);
-    memset(vs, 0, sizeof(char) * 10000);
-    memset(fs, 0, sizeof(char) * 10000);
-
-    FILE *fp;
-    char c;
-    int count;
-
-    fp = fopen("shader/shader.vs", "r");
-    count = 0;
-    while ((c = fgetc(fp)) != EOF)
-    {
-        vs[count] = c;
-        count++;
-    }
-    fclose(fp);
-
-    fp = fopen("shader/shader.fs", "r");
-    count = 0;
-    while ((c = fgetc(fp)) != EOF)
-    {
-        fs[count] = c;
-        count++;
-    }
-    fclose(fp);
-
-    v = glCreateShader(GL_VERTEX_SHADER);
-    f = glCreateShader(GL_FRAGMENT_SHADER);
-
-    const char *vv;
-    const char *ff;
-    vv = vs;
-    ff = fs;
-
-    glShaderSource(v, 1, &vv, NULL);
-    glShaderSource(f, 1, &ff, NULL);
-
-    int success;
-
-    glCompileShader(v);
-    glGetShaderiv(v, GL_COMPILE_STATUS, &success);
-    if (!success)
-    {
-        char info_log[5000];
-        glGetShaderInfoLog(v, 5000, NULL, info_log);
-        printf("Error in vertex shader compilation!\n");
-        printf("Info Log: %s\n", info_log);
-    }
-
-    glCompileShader(f);
-    glGetShaderiv(f, GL_COMPILE_STATUS, &success);
-    if (!success)
-    {
-        char info_log[5000];
-        glGetShaderInfoLog(f, 5000, NULL, info_log);
-        printf("Error in fragment shader compilation!\n");
-        printf("Info Log: %s\n", info_log);
-    }
-
-    p = glCreateProgram();
-    glAttachShader(p, v);
-    glAttachShader(p, f);
-    glLinkProgram(p);
-    glUseProgram(p);
-
-    free(vs);
-    free(fs);
 }
 
 void draw_box(float ox, float oy, float oz, float width, float height, float length)
@@ -183,7 +101,6 @@ void draw_box(float ox, float oy, float oz, float width, float height, float len
     glEnd();
 }
 
-//sf 设置长方体
 void init_sph_system()
 {
     real_world_origin.x = -40.0f;
@@ -288,7 +205,7 @@ void display_func()
     //glEnable(GL_POINT_SMOOTH);
     glEnable(GL_DEPTH_TEST);
 
-    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);   //sf 背景颜色
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     glDisable(GL_CULL_FACE);
     glShadeModel(GL_SMOOTH);
@@ -512,7 +429,6 @@ int main(int argc, char **argv)
     init();
     init_sph_system();
     init_ratio();
-    //set_shaders();
     glEnable(GL_VERTEX_PROGRAM_POINT_SIZE_NV);
     glEnable(GL_POINT_SPRITE_ARB);
     glTexEnvi(GL_POINT_SPRITE_ARB, GL_COORD_REPLACE_ARB, GL_TRUE);

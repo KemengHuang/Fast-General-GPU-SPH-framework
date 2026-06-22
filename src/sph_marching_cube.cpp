@@ -451,7 +451,7 @@ void polygonize_no_render(gridcell* grid, float isolevel, float unitScale, float
 
     //printf("In The polygonize_no_render \n");
 
-    for (int i = 0; triTable[cubeindex][i] != -1; i += 3)    //sf 循环次数不多，应该不需要并行
+    for (int i = 0; triTable[cubeindex][i] != -1; i += 3)    // loop count is small, no need to parallelize
     {
         normlist[triTable[cubeindex][i]] = my_Normalize(normlist[triTable[cubeindex][i]]);
         normlist[triTable[cubeindex][i + 1]] = my_Normalize(normlist[triTable[cubeindex][i + 1]]);
@@ -459,7 +459,7 @@ void polygonize_no_render(gridcell* grid, float isolevel, float unitScale, float
 
         float3 stride, /*one,*/ tempV1, tempV2, tempV3;
         stride = make_float3(mc_stride, mc_stride, mc_stride);
-        //one = vec_[PBOUNDARYMIN];    // sf 声明之后完全没有用过
+        //one = vec_[PBOUNDARYMIN];    // declared but never used
 
         //printf("In The FOR \n");
 
@@ -602,7 +602,6 @@ void outputMesh(SystemParameter *sys_para, unsigned int loop_times)
     outs << "mesh/contain" << loop_times << ".stl";
     std::ofstream out(outs.str());
 	//ostringstream outs;
-	//outs << "mesh/contain" << loop_times << ".inc";                    //sf 准备文件名
 	//std::ofstream out(outs.str().c_str());
 
 	//out << "#declare Mesh_B = ";

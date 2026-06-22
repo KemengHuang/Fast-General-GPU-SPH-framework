@@ -1,0 +1,24 @@
+# Auto detect text files and normalize line endings to LF on checkout.
+* text=auto eol=lf
+
+# Explicitly mark source code as text.
+*.cpp text
+*.c text
+*.h text
+*.cu text
+*.cuh text
+*.cmake text
+CMakeLists.txt text
+*.md text
+*.json text
+*.glsl text
+*.vs text
+*.fs text
+
+# Mark binary files so they are not modified.
+*.png binary
+*.jpg binary
+*.bmp binary
+*.exe binary
+*.dll binary
+*.lib binary

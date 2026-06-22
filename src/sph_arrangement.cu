@@ -1003,8 +1003,8 @@ void Arrangement::arrangeSMSMode()
     //sortIndexByHash();
     CountingSortCUDA();
     //CUDA_SAFE_CALL(cudaDeviceSynchronize());
-    reindexParticles();  //sf 重新调整粒子顺序！！！！！！！！！！！！！！！需要注意温度等信息需要在这函数内加入
-	//sf 特别是下一个时间不长仍会用到的属性 比如温度
+    reindexParticles();  // reorder particles after sorting; add temperature/other per-particle attributes here if needed
+	// especially properties needed in the next time step, e.g. temperature
 
     //CUDA_SAFE_CALL(cudaDeviceSynchronize());
     findCellRange();

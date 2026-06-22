@@ -20,12 +20,12 @@
 #include "sph_kernel.cuh"
 #include "sph_marching_cube.h"
 #include "pcisph_factor.h"   //sf add
-#include "parameters.h"
+
 
 namespace sph
 {
 
-const char *kDefaultSceneFileName = "scene_default.json";
+const char *kDefaultSceneFileName = "assets/scene_default.json";
 const uint kDefaultBufferCapacity = 65536U;
 
 /****************************** utilities ******************************/
@@ -89,7 +89,6 @@ bool readSceneFromJsonFile(Scene *out, const std::string &file_name)
 
 	return true;
 }
-//sf ����SPHϵͳ����
 inline void defaultInitializeSPHSysPara(SystemParameter &sys_para, Scene *scene)
 {
 	
@@ -199,7 +198,7 @@ HybridSystem::HybridSystem(const float3 &real_world_side, const float3 &sim_orig
     initializeKernel();
 
     // render 
-    particle_texture_.loadPNG("ball32.png");
+    particle_texture_.loadPNG("assets/ball32.png");
     glGenBuffers(1, &position_vbo_);
     glGenBuffers(1, &color_vbo_);
 
@@ -222,7 +221,7 @@ void HybridSystem::tick()
     HighResolutionTimerForWin timer;
     timer.set_start();
     static int step = 0;
-    cudaEvent_t start, end0, end1, end2, end3; //sf ��¼ʱ��
+    cudaEvent_t start, end0, end1, end2, end3;
     if (get_detailed_time_)
     {
         CUDA_SAFE_CALL(cudaEventCreate(&start));
@@ -269,7 +268,6 @@ void HybridSystem::tick()
 	time += 0.003;
     if (get_detailed_time_) CUDA_SAFE_CALL(cudaEventRecord(end3));
 
-    //sf �����ݸ��ƻ�host
     CUDA_SAFE_CALL(cudaMemcpy(host_buff_.get_buff_list().final_position, device_buff_.get_buff_list().final_position, nump_ * sizeof(float3), cudaMemcpyDeviceToHost));
     CUDA_SAFE_CALL(cudaMemcpy(host_buff_.get_buff_list().color, device_buff_.get_buff_list().color, nump_ * sizeof(uint), cudaMemcpyDeviceToHost));
     CUDA_SAFE_CALL(cudaDeviceSynchronize());
@@ -278,7 +276,6 @@ void HybridSystem::tick()
 
 
 
-    // sf ��������������ʱ��
     if (get_detailed_time_)
     {
         CUDA_SAFE_CALL(cudaEventElapsedTime(&pre_time_, start, end0));
@@ -303,7 +300,6 @@ void HybridSystem::tick()
     }
 }
 
-//sf ��ʼ������
 
 
 void HybridSystem::initializeScene(const std::string &file_name, Scene scene)
@@ -351,7 +347,7 @@ void HybridSystem::initializeScene2(const std::string &file_name)
     //}
 
     //sys_para_.mass = scene.mass;
-    transSysParaToDevice(&sys_para_);  //sf ����ϵͳ������device��
+    transSysParaToDevice(&sys_para_);
 
     resetBuffer(scene.recomm_nump);
     particle_interval = scene.interval;
@@ -429,13 +425,11 @@ bool HybridSystem::isRunning()
     return is_running_;
 }
 
-//sf ������������
 uint HybridSystem::getNumParticles()
 {
     return nump_;
 }
 
-//sf ��������idx��final_position
 float3 HybridSystem::getPosition(unsigned int idx)
 {
     //return host_buff_.position[idx] * sys_para_.sim_ratio + sys_para_.sim_origin;

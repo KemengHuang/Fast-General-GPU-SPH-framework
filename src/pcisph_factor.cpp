@@ -23,7 +23,7 @@ float computeDensityErrorFactorSMS(float mass, float rest_density, float time_st
 	//cudaMemset(particle_device, 0, nump);
 	computeGradWValuesSimpleSMS(buff_list, cell_start, cell_end, block_task, num_block, particle_device);
 
-	cudaMemcpy(particle_host, particle_device, sizeof(sumGrad)*nump, cudaMemcpyDeviceToHost);//传回主机端
+	cudaMemcpy(particle_host, particle_device, sizeof(sumGrad)*nump, cudaMemcpyDeviceToHost);  // copy back to host
 	printf("CUDA_SAFE_CALL(cudaMalloc((void**)&particle_device, nump * sizeof(sumGrad))): %.20f\n", particle_host[0].sumGradWDot);
 
     //int tds = 256;
@@ -45,7 +45,7 @@ float computeDensityErrorFactorSMS(float mass, float rest_density, float time_st
 float computeFactorSimple(float mass, float rest_density, float time_step, uint index, sumGrad *particle_host)
 {
 	float restVol = mass / rest_density;
-	float preFactor = 2 * restVol * restVol * time_step * time_step;     //my (delta)t^2*m^2/p0^2   // 是否需要2倍！！！
+	float preFactor = 2 * restVol * restVol * time_step * time_step;     // pre-factor: 2 * (dt*m/rho0)^2 (the factor 2 is debatable)
 	float3 temp_plus = particle_host[index].sumGradW;
 	float3 temp_minus = temp_plus;
 	temp_minus.x *= -1; temp_minus.y *= -1; temp_minus.z *= -1;
