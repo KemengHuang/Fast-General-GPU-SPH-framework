@@ -1,12 +1,1 @@
-sph_fastest/.vs
-sph_fastest/Hybrid_Fluid_Simulation/x64
-sph_fastest/x64
-sph_fastest/saveScreen
-sph_fastest/*.zip
-sph_fastest/Hybrid_Fluid_Simulation/saveScreen*
-sph_fastest/Hybrid_Fluid_Simulation/saveSurface*
-sph_fastest/Hybrid_Fluid_Simulation/*.mp4
-sph_fastest/Hybrid_Fluid_Simulation/mesh
-sph_fastest/Hybrid_Fluid_Simulation/*.txt
-sph_fastest/Hybrid_Fluid_Simulation/Release
 *build*
