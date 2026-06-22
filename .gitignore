@@ -9,3 +9,4 @@ sph_fastest/Hybrid_Fluid_Simulation/*.mp4
 sph_fastest/Hybrid_Fluid_Simulation/mesh
 sph_fastest/Hybrid_Fluid_Simulation/*.txt
 sph_fastest/Hybrid_Fluid_Simulation/Release
+*build*

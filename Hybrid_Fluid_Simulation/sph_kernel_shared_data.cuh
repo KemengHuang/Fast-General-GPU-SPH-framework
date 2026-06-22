@@ -30,10 +30,11 @@ const int kNumNeighborCells = 64;
 const int rate = 2;
 
 
-texture<float4, 1, cudaReadModeElementType> texRef;
+//texture<float4, 1, cudaReadModeElementType> texRef;
 
-texture<float4, 1, cudaReadModeElementType> texRefe;
-
+//texture<float4, 1, cudaReadModeElementType> texRefe;
+cudaTextureObject_t texRef = 0;
+cudaTextureObject_t texRefe = 0;
 
 struct GrediData
 {

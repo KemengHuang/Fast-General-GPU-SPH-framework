@@ -1125,9 +1125,17 @@ void computeDensitySMS64(ParticleBufferList buff_list, int *cell_offset, int *ce
     if (num_block <= 0) return;
     int num_blocks = ceil_int(num_block, 2);
     int num_thread = 64;
-
-    cudaBindTexture(0, texRef, buff_list.position_d);
-
+    cudaCreateTextureObject(&texRef,
+        &(cudaResourceDesc){
+        .resType = cudaResourceTypeLinear,
+            .res.linear = { ptr, cudaCreateChannelDesc<float4>(), 100 * sizeof(float4) }
+    },
+        & (cudaTextureDesc) {
+        .readMode = cudaReadModeElementType
+    },
+        NULL);
+    //cudaBindTexture(0, texRef, buff_list.position_d);
+    cudaCreateTextureObject(&texRef, &(cudaResourceDesc){cudaResourceTypeLinear, { .linear = {ptr,cudaCreateChannelDesc<float4>(),100 * sizeof(float4)} }}, & (cudaTextureDesc) { .readMode = cudaReadModeElementType }, NULL);
     knComputeDensitySMS64 << <num_blocks, num_thread >> >(buff_list, cell_offset, cell_num, block_task);
 
     cudaUnbindTexture(texRef);
