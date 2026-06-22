@@ -81,3 +81,31 @@ endif()
 
 # Source grouping (optional)
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${gsph_SOURCES})
+
+# ------------------------------------------------------------------
+# Visual Studio convenience
+# ------------------------------------------------------------------
+set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT gsph)
+set_property(TARGET gsph PROPERTY VS_DEBUGGER_WORKING_DIRECTORY "$(OutDir)")
+
+# Copy runtime assets next to the executable so F5 / double-click work
+set(gsph_RUNTIME_ASSETS
+    Hybrid_Fluid_Simulation/scene_default.json
+    Hybrid_Fluid_Simulation/scene_default1.json
+    Hybrid_Fluid_Simulation/ball32.png
+    Hybrid_Fluid_Simulation/insts_latency.json
+    Hybrid_Fluid_Simulation/sph_tra_arti_block_statistics.json
+    Hybrid_Fluid_Simulation/sph_sms_arti_block_statistics.json
+)
+foreach(asset ${gsph_RUNTIME_ASSETS})
+    add_custom_command(TARGET gsph POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_CURRENT_SOURCE_DIR}/${asset}
+            $<TARGET_FILE_DIR:gsph>/
+    )
+endforeach()
+add_custom_command(TARGET gsph POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_CURRENT_SOURCE_DIR}/Hybrid_Fluid_Simulation/Shader
+        $<TARGET_FILE_DIR:gsph>/Shader
+)
