@@ -14,9 +14,11 @@
 #include <sstream>
 #include <vector>
 #include <GL/freeglut.h>
+#include <cuda_gl_interop.h>
 #include "json/json.h"
 #include "json/reader.h"
 #include "core/cuda_math.cuh"
+#include "core/cuda_call_check.h"
 #include "solver/kernel_dispatch.cuh"
 #include "simulation/sph_marching_cube.h"
 #include "simulation/pcisph_factor.h"
@@ -193,14 +195,24 @@ HybridSystem::HybridSystem(const float3 &real_world_side, const float3 &sim_orig
                                       real_world_side.z / sys_para_.world_size.z);
     sys_para_.sim_origin = sim_origin;
 
-	initializeScene(kDefaultSceneFileName, scene);
-
     initializeKernel();
+    createPersistentCudaResources();
+
+	initializeScene(kDefaultSceneFileName, scene);
 
     // render 
     particle_texture_.loadPNG("assets/ball32.png");
     glGenBuffers(1, &position_vbo_);
     glGenBuffers(1, &color_vbo_);
+
+    // Allocate GPU storage once, then register the VBOs with CUDA so the
+    // particle data can be copied directly from device memory each frame.
+    glBindBuffer(GL_ARRAY_BUFFER, position_vbo_);
+    glBufferData(GL_ARRAY_BUFFER, nump_ * sizeof(float3), nullptr, GL_DYNAMIC_DRAW);
+    glBindBuffer(GL_ARRAY_BUFFER, color_vbo_);
+    glBufferData(GL_ARRAY_BUFFER, nump_ * sizeof(uint), nullptr, GL_DYNAMIC_DRAW);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    registerGraphicsResources();
 
     get_detailed_time_ = true;
     generate_mesh_ = false;
@@ -209,6 +221,9 @@ HybridSystem::HybridSystem(const float3 &real_world_side, const float3 &sim_orig
 
 HybridSystem::~HybridSystem()
 {
+    waitForGraphicsCopy();
+    unregisterGraphicsResources();
+    destroyPersistentCudaResources();
     resetBuffer(0);
     releaseKernel();
 }
@@ -221,16 +236,10 @@ void HybridSystem::tick()
     HighResolutionTimerForWin timer;
     timer.set_start();
     static int step = 0;
-    cudaEvent_t start, end0, end1, end2, end3;
-    if (get_detailed_time_)
+    if (get_detailed_time_ && !tick_events_created_)
     {
-        CUDA_SAFE_CALL(cudaEventCreate(&start));
-        CUDA_SAFE_CALL(cudaEventCreate(&end0));
-        CUDA_SAFE_CALL(cudaEventCreate(&end1));
-        CUDA_SAFE_CALL(cudaEventCreate(&end2));
-        CUDA_SAFE_CALL(cudaEventCreate(&end3));
+        createPersistentCudaResources();
     }
-    static float tot_pres = 0.0f, tot_forc = 0.0f, tot_tot = 0.0f;
     int *d_index = arrangement_->getDevCellIndex();
     int *offset_data = arrangement_->getDevOffsetData();
     int *cell_offset = arrangement_->getDevCellOffset();
@@ -238,7 +247,7 @@ void HybridSystem::tick()
 	int *cell_offsetM = arrangement_->getDevCellOffsetM();
 
     int *cell_nump = arrangement_->getDevCellNumP();
-    if (get_detailed_time_) CUDA_SAFE_CALL(cudaEventRecord(start));
+    if (get_detailed_time_) CUDA_SAFE_CALL(cudaEventRecord(tick_events_[0]));
     int middle = nump_;
     //arrangement_->sortParticles();
 
@@ -250,27 +259,39 @@ void HybridSystem::tick()
     ParticleIdxRange tra_range(0, middle);      // [0, middle)
 
 //      std::cout << "middle value: ******************************************" << middle << std::endl;
-    if (get_detailed_time_) CUDA_SAFE_CALL(cudaEventRecord(end0));
+    if (get_detailed_time_) CUDA_SAFE_CALL(cudaEventRecord(tick_events_[1]));
 
 	computeDensityHybrid128n(cell_offsetM, tra_range, device_buff_.get_buff_list(), d_index, cell_offset, cell_nump, arrangement_->getBlockTasks(), arrangement_->getNumBlockSMSMode());
 //    computeDensitySMS64(device_buff_.get_buff_list(), cell_offset, cell_nump, arrangement_->getBlockTasks(), arrangement_->getNumBlockSMSMode());
 //    computeDensityTRA(device_buff_.get_buff_list(), ParticleIdxRange(0, nump_), cell_offset, cell_nump);
     //   std::cout << step << std::endl;
-    if (get_detailed_time_) CUDA_SAFE_CALL(cudaEventRecord(end1));
+    if (get_detailed_time_) CUDA_SAFE_CALL(cudaEventRecord(tick_events_[2]));
 
 	computeForceHybrid128n(cell_offsetM, tra_range, device_buff_.get_buff_list(), d_index, cell_offset, cell_nump, arrangement_->getBlockTasks(), arrangement_->getNumBlockSMSMode());
 //    computeForceSMS64(device_buff_.get_buff_list(), cell_offset, cell_nump, arrangement_->getBlockTasks(), arrangement_->getNumBlockSMSMode());
 //    computeForceTRA(device_buff_.get_buff_list(), ParticleIdxRange(0, nump_), cell_offset, cell_nump);
-    if (get_detailed_time_) CUDA_SAFE_CALL(cudaEventRecord(end2));
+    if (get_detailed_time_) CUDA_SAFE_CALL(cudaEventRecord(tick_events_[3]));
 
     advance(device_buff_.get_buff_list(), nump_);
 	//advanceWave(device_buff_.get_buff_list(), nump_,time);
 	time += 0.003;
-    if (get_detailed_time_) CUDA_SAFE_CALL(cudaEventRecord(end3));
+    if (get_detailed_time_) CUDA_SAFE_CALL(cudaEventRecord(tick_events_[4]));
 
-    CUDA_SAFE_CALL(cudaMemcpy(host_buff_.get_buff_list().final_position, device_buff_.get_buff_list().final_position, nump_ * sizeof(float3), cudaMemcpyDeviceToHost));
-    CUDA_SAFE_CALL(cudaMemcpy(host_buff_.get_buff_list().color, device_buff_.get_buff_list().color, nump_ * sizeof(uint), cudaMemcpyDeviceToHost));
-    CUDA_SAFE_CALL(cudaDeviceSynchronize());
+    // Record the point where all simulation kernels for this frame finish.
+    // If CUDA-GL interop is unavailable we fall back to asynchronous D2H
+    // copies that the draw path will synchronize on.
+    CUDA_SAFE_CALL(cudaEventRecord(compute_done_event_, 0));
+    if (!vbo_resources_registered_)
+    {
+        CUDA_SAFE_CALL(cudaStreamWaitEvent(copy_stream_, compute_done_event_, 0));
+        CUDA_SAFE_CALL(cudaMemcpyAsync(host_buff_.get_buff_list().final_position,
+                                       device_buff_.get_buff_list().final_position,
+                                       nump_ * sizeof(float3), cudaMemcpyDeviceToHost, copy_stream_));
+        CUDA_SAFE_CALL(cudaMemcpyAsync(host_buff_.get_buff_list().color,
+                                       device_buff_.get_buff_list().color,
+                                       nump_ * sizeof(uint), cudaMemcpyDeviceToHost, copy_stream_));
+        CUDA_SAFE_CALL(cudaEventRecord(copy_done_event_, copy_stream_));
+    }
 
     timer.set_end();
 
@@ -278,20 +299,14 @@ void HybridSystem::tick()
 
     if (get_detailed_time_)
     {
-        CUDA_SAFE_CALL(cudaEventElapsedTime(&pre_time_, start, end0));
-        CUDA_SAFE_CALL(cudaEventElapsedTime(&density_time_, end0, end1));
-        CUDA_SAFE_CALL(cudaEventElapsedTime(&force_time_, end1, end2));
-        CUDA_SAFE_CALL(cudaEventElapsedTime(&total_time_, start, end3));
+        // Events are recorded asynchronously; wait for the last one before
+        // reading elapsed times so the measurements are accurate.
+        CUDA_SAFE_CALL(cudaEventSynchronize(tick_events_[4]));
 
-        tot_pres += density_time_;
-        tot_forc += force_time_;
-        tot_tot += total_time_;
-
-        CUDA_SAFE_CALL(cudaEventDestroy(start));
-        CUDA_SAFE_CALL(cudaEventDestroy(end0));
-        CUDA_SAFE_CALL(cudaEventDestroy(end1));
-        CUDA_SAFE_CALL(cudaEventDestroy(end2));
-        CUDA_SAFE_CALL(cudaEventDestroy(end3));
+        CUDA_SAFE_CALL(cudaEventElapsedTime(&pre_time_, tick_events_[0], tick_events_[1]));
+        CUDA_SAFE_CALL(cudaEventElapsedTime(&density_time_, tick_events_[1], tick_events_[2]));
+        CUDA_SAFE_CALL(cudaEventElapsedTime(&force_time_, tick_events_[2], tick_events_[3]));
+        CUDA_SAFE_CALL(cudaEventElapsedTime(&total_time_, tick_events_[0], tick_events_[4]));
     }
     ++step;
     loop = step;
@@ -471,13 +486,44 @@ void HybridSystem::drawParticles(float rad, int size)
     glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
+    // Upload particle data.  Prefer CUDA-GL interop (device->device copy)
+    // over a host round-trip.
+    if (vbo_resources_registered_)
+    {
+        CUDA_SAFE_CALL(cudaStreamWaitEvent(0, compute_done_event_, 0));
+
+        CUDA_SAFE_CALL(cudaGraphicsMapResources(1, &position_vbo_res_, 0));
+        CUDA_SAFE_CALL(cudaGraphicsMapResources(1, &color_vbo_res_, 0));
+
+        size_t num_bytes_pos = 0, num_bytes_col = 0;
+        float3 *d_position_vbo = nullptr;
+        uint *d_color_vbo = nullptr;
+        CUDA_SAFE_CALL(cudaGraphicsResourceGetMappedPointer((void**)&d_position_vbo, &num_bytes_pos, position_vbo_res_));
+        CUDA_SAFE_CALL(cudaGraphicsResourceGetMappedPointer((void**)&d_color_vbo, &num_bytes_col, color_vbo_res_));
+
+        copyParticleDataToVBOs(device_buff_.get_buff_list(), nump_, d_position_vbo, d_color_vbo);
+
+        CUDA_SAFE_CALL(cudaGraphicsUnmapResources(1, &position_vbo_res_, 0));
+        CUDA_SAFE_CALL(cudaGraphicsUnmapResources(1, &color_vbo_res_, 0));
+    }
+    else
+    {
+        waitForGraphicsCopy();
+    }
+
     // Point buffers
 	//GLint gsize = size;
     glBindBuffer(GL_ARRAY_BUFFER, position_vbo_);
-    glBufferData(GL_ARRAY_BUFFER, nump_*sizeof(float3), host_buff_.get_buff_list().final_position, GL_DYNAMIC_DRAW);
+    if (!vbo_resources_registered_)
+    {
+        glBufferData(GL_ARRAY_BUFFER, nump_ * sizeof(float3), host_buff_.get_buff_list().final_position, GL_DYNAMIC_DRAW);
+    }
 	glVertexPointer(3, GL_FLOAT, 0, 0x0);
     glBindBuffer(GL_ARRAY_BUFFER, color_vbo_);
-    glBufferData(GL_ARRAY_BUFFER, nump_ * sizeof(uint), host_buff_.get_buff_list().color, GL_DYNAMIC_DRAW);
+    if (!vbo_resources_registered_)
+    {
+        glBufferData(GL_ARRAY_BUFFER, nump_ * sizeof(uint), host_buff_.get_buff_list().color, GL_DYNAMIC_DRAW);
+    }
     glColorPointer(4, GL_UNSIGNED_BYTE, 0, 0x0);
     glEnableClientState(GL_VERTEX_ARRAY);
     glEnableClientState(GL_COLOR_ARRAY);
@@ -500,11 +546,6 @@ void HybridSystem::drawParticles(float rad, int size)
     glDisable(GL_TEXTURE_2D);
     glDepthMask(GL_TRUE);
 }
-int cftn = 0;
-float pre = 0;
-float tot = 0;
-float fore = 0;
-std::ofstream outtt("combine666666666666666666666666666666666.txt");
 void HybridSystem::drawInfo(GLdouble w, GLdouble h)
 {
     float x = 20, y = 20, delta_y = 20;
@@ -529,18 +570,6 @@ void HybridSystem::drawInfo(GLdouble w, GLdouble h)
     }
     float xixi = float(1000.0f / total_time_);
 
-	if (tt > 10&&tt<631){
-        cftn++;
-        pre += pre_time_;
-        fore += (density_time_ + force_time_);
-		//outtt << xixi << std::endl;
-        if (tt == 630) {
-            float outv1 = pre / cftn;
-            float outv2 = fore / cftn;
-            outtt << outv1 << "   " << outv2 << "   " << outv1 + outv2 << std::endl;
-        }
-	}
-//	std::cout << tt << std::endl;
     ss << "FPS: " << xixi;//time;
 
 
@@ -669,5 +698,76 @@ void HybridSystem::action1()
     BuffInit(device_buff_.get_buff_list(), nump_);
     host_buff_.transfer(device_buff_, original_nump, nump_ - original_nump, cudaMemcpyHostToDevice);
     arrangement_->resetNumParticle(nump_);
+}
+
+void HybridSystem::registerGraphicsResources()
+{
+    if (vbo_resources_registered_) return;
+
+    cudaError_t pos_err = cudaGraphicsGLRegisterBuffer(&position_vbo_res_, position_vbo_, cudaGraphicsMapFlagsWriteDiscard);
+    cudaError_t col_err = cudaGraphicsGLRegisterBuffer(&color_vbo_res_, color_vbo_, cudaGraphicsMapFlagsWriteDiscard);
+    if (pos_err == cudaSuccess && col_err == cudaSuccess)
+    {
+        vbo_resources_registered_ = true;
+    }
+    else
+    {
+        // Registration failed (e.g. no GL context or unsupported config).
+        // Clean up any partial registration and fall back to the host-copy path.
+        if (pos_err == cudaSuccess) cudaGraphicsUnregisterResource(position_vbo_res_);
+        if (col_err == cudaSuccess) cudaGraphicsUnregisterResource(color_vbo_res_);
+        position_vbo_res_ = nullptr;
+        color_vbo_res_ = nullptr;
+    }
+}
+
+void HybridSystem::unregisterGraphicsResources()
+{
+    if (!vbo_resources_registered_) return;
+    CUDA_SAFE_CALL(cudaGraphicsUnregisterResource(position_vbo_res_));
+    CUDA_SAFE_CALL(cudaGraphicsUnregisterResource(color_vbo_res_));
+    position_vbo_res_ = nullptr;
+    color_vbo_res_ = nullptr;
+    vbo_resources_registered_ = false;
+}
+
+void HybridSystem::createPersistentCudaResources()
+{
+    CUDA_SAFE_CALL(cudaStreamCreate(&copy_stream_));
+    CUDA_SAFE_CALL(cudaEventCreate(&compute_done_event_));
+    CUDA_SAFE_CALL(cudaEventCreate(&copy_done_event_));
+
+    if (get_detailed_time_ && !tick_events_created_)
+    {
+        for (int i = 0; i < 5; ++i)
+        {
+            CUDA_SAFE_CALL(cudaEventCreate(&tick_events_[i]));
+        }
+        tick_events_created_ = true;
+    }
+}
+
+void HybridSystem::destroyPersistentCudaResources()
+{
+    if (tick_events_created_)
+    {
+        for (int i = 0; i < 5; ++i)
+        {
+            if (tick_events_[i]) CUDA_SAFE_CALL(cudaEventDestroy(tick_events_[i]));
+            tick_events_[i] = nullptr;
+        }
+        tick_events_created_ = false;
+    }
+    if (copy_done_event_) { CUDA_SAFE_CALL(cudaEventDestroy(copy_done_event_)); copy_done_event_ = nullptr; }
+    if (compute_done_event_) { CUDA_SAFE_CALL(cudaEventDestroy(compute_done_event_)); compute_done_event_ = nullptr; }
+    if (copy_stream_) { CUDA_SAFE_CALL(cudaStreamDestroy(copy_stream_)); copy_stream_ = nullptr; }
+}
+
+void HybridSystem::waitForGraphicsCopy()
+{
+    if (copy_stream_)
+    {
+        CUDA_SAFE_CALL(cudaStreamSynchronize(copy_stream_));
+    }
 }
 }

@@ -173,6 +173,10 @@ void computeCorrectivePressureForceHybrid128n(ParticleIdxRange range, ParticleBu
 
 void computeCorrectivePressureForceTRA(ParticleBufferList buff_list, int *cell_offset, int *cell_num, ParticleIdxRange range);
 
+// Copy particle positions/colors directly into CUDA-registered OpenGL VBOs.
+void copyParticleDataToVBOs(ParticleBufferList buff_list, unsigned int nump,
+                            float3 *d_position_vbo, uint *d_color_vbo);
+
 //sf heat conduction-------------------
 
 

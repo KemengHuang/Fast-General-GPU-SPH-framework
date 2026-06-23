@@ -281,6 +281,25 @@ void advanceWave(ParticleBufferList buff_list, int nump, float time){
     knIntegrateVelocitySimWave << <num_block, num_thread >> >(buff_list, nump, time);
 }
 
+__global__
+void knCopyToVBOs(ParticleBufferList buff_list, unsigned int nump,
+                  float3 *d_position_vbo, uint *d_color_vbo)
+{
+    unsigned int idx = threadIdx.x + __umul24(blockIdx.x, blockDim.x);
+    if (idx >= nump) return;
+    d_position_vbo[idx] = buff_list.final_position[idx];
+    d_color_vbo[idx] = buff_list.color[idx];
+}
+
+void copyParticleDataToVBOs(ParticleBufferList buff_list, unsigned int nump,
+                            float3 *d_position_vbo, uint *d_color_vbo)
+{
+    if (nump == 0 || !d_position_vbo || !d_color_vbo) return;
+    int num_thread = kDefaultNumThreadTRA;
+    int num_block = ceil_int(nump, num_thread);
+    knCopyToVBOs << <num_block, num_thread >> >(buff_list, nump, d_position_vbo, d_color_vbo);
+}
+
 void advanceMix(ParticleBufferList buff_list, int nump)
 {
     int num_thread = kDefaultNumThreadTRA;

@@ -17,10 +17,9 @@ find_package(OpenGL REQUIRED)
 find_package(jsoncpp CONFIG REQUIRED)
 find_package(CUDAToolkit REQUIRED)
 
-# CUDA architectures (adjust as needed)
-if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-    set(CMAKE_CUDA_ARCHITECTURES "80;86;89;90" CACHE STRING "CUDA architectures")
-endif()
+# CUDA architectures (adjust as needed).
+# The current workstation has an RTX 4090 (sm_89); native code gives the best performance.
+set(CMAKE_CUDA_ARCHITECTURES "89" CACHE STRING "CUDA architectures" FORCE)
 
 # Executable
 add_executable(gsph)
@@ -65,13 +64,13 @@ set_target_properties(gsph PROPERTIES
 
 # Compiler options
 target_compile_options(gsph PRIVATE
-    $<$<COMPILE_LANGUAGE:CXX>:-O3 -Wall>
+    $<$<COMPILE_LANGUAGE:CXX>:/O2 /W3>
     $<$<COMPILE_LANGUAGE:CUDA>:
         --use_fast_math
-        -lineinfo
         --extended-lambda
         --expt-relaxed-constexpr
         --default-stream=per-thread
+        $<$<CONFIG:Debug,RelWithDebInfo>:-lineinfo>
     >
 )
 

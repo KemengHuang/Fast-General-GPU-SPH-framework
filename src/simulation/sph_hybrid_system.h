@@ -61,6 +61,11 @@ private:
     void resetBuffer(uint nump);
 	void addParticle2(float3 position, float3 velocity, condition phase, float temperature);
     void addParticle(float3 position, float3 velocity = make_float3(0.0f, 0.0f, 0.0f), int color_type = 1);
+
+    void createPersistentCudaResources();
+    void destroyPersistentCudaResources();
+    void waitForGraphicsCopy();
+
     bool is_running_ = false;
     uint nump_ = 0U;
     uint buff_capacity_ = 0U;
@@ -75,8 +80,8 @@ private:
 	Arrangement *arrangement_;
 	float particle_interval = 0.5f;
     HighResolutionTimerForWin frame_timer_;
-    bool get_detailed_time_;
-    float total_time_;
+    bool get_detailed_time_ = true;
+    float total_time_ = 0.0f;
     float pre_time_, density_time_, force_time_;
     bool generate_mesh_;
 	bool add_smoke_;
@@ -85,6 +90,20 @@ private:
     PNGTexture particle_texture_;
     GLuint position_vbo_;
     GLuint color_vbo_;
+
+    void registerGraphicsResources();
+    void unregisterGraphicsResources();
+
+    cudaGraphicsResource_t position_vbo_res_ = nullptr;
+    cudaGraphicsResource_t color_vbo_res_ = nullptr;
+    bool vbo_resources_registered_ = false;
+
+    // asynchronous device->host copy resources
+    cudaStream_t copy_stream_ = nullptr;
+    cudaEvent_t compute_done_event_ = nullptr;
+    cudaEvent_t copy_done_event_ = nullptr;
+    cudaEvent_t tick_events_[5] = {};
+    bool tick_events_created_ = false;
 
 	// action
 	void action1();

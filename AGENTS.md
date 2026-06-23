@@ -99,6 +99,21 @@ These paths are also hard-coded in:
 - Prefer minimal changes; large kernel-file splits and renderer refactors are out of scope for
   light cleanups.
 
+## Performance Notes
+
+- **CUDA architecture is pinned to the local GPU.** `CMakeLists.txt` sets
+  `CMAKE_CUDA_ARCHITECTURES` to `89` for the RTX 4090 workstation. Reconfigure after pulling
+  changes so the cache entry is updated.
+- **CUDA-GL interop is used for rendering.** `HybridSystem::drawParticles()` registers the
+  position/color VBOs with CUDA and copies `final_position`/`color` directly from device memory
+  into the VBOs with a small kernel (`copyParticleDataToVBOs`). This avoids the previous
+  synchronous D2H + `glBufferData` host round-trip.
+- **Per-frame CUDA event creation was removed.** Timing events are created once and reused.
+  The detailed timing path still synchronizes on the last event, so turn off
+  `get_detailed_time_` for maximum throughput.
+- **The leftover benchmark file** (`combine666...txt`) and its locked file handle were removed;
+  the file is no longer opened at startup.
+
 ## Common Issues
 
 - If Visual Studio has the `.vs` database open, `rm -rf build` may fail. Reconfigure in place
