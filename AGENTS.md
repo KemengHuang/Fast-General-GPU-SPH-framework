@@ -104,6 +104,9 @@ These paths are also hard-coded in:
 - **CUDA architecture is pinned to the local GPU.** `CMakeLists.txt` sets
   `CMAKE_CUDA_ARCHITECTURES` to `89` for the RTX 4090 workstation. Reconfigure after pulling
   changes so the cache entry is updated.
+- **MSVC `/O2` is only added in Release/RelWithDebInfo.** Debug builds keep the default `/Od`
+  and `/RTC1`; this avoids the "/O2 and /RTC1 are incompatible" error when building the
+  `Debug` configuration in Visual Studio.
 - **CUDA-GL interop is used for rendering.** `HybridSystem::drawParticles()` registers the
   position/color VBOs with CUDA and copies `final_position`/`color` directly from device memory
   into the VBOs with a small kernel (`copyParticleDataToVBOs`). This avoids the previous
@@ -113,6 +116,12 @@ These paths are also hard-coded in:
   `get_detailed_time_` for maximum throughput.
 - **The leftover benchmark file** (`combine666...txt`) and its locked file handle were removed;
   the file is no longer opened at startup.
+- **Per-frame scalar D2H copies are now asynchronous.** `middle_value_` and `h_num_cta_` are
+  copied into pinned host buffers with `cudaMemcpyAsync` + `cudaStreamSynchronize`, avoiding the
+  implicit global device sync of synchronous `cudaMemcpy`.
+- **Detailed timing is off by default.** Set `get_detailed_time_ = true` in
+  `src/simulation/sph_hybrid_system.h` only when you need per-stage timing; it still inserts a
+  per-frame `cudaEventSynchronize`.
 
 ## Common Issues
 

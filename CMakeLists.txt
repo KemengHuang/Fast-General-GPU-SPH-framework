@@ -64,7 +64,8 @@ set_target_properties(gsph PROPERTIES
 
 # Compiler options
 target_compile_options(gsph PRIVATE
-    $<$<COMPILE_LANGUAGE:CXX>:/O2 /W3>
+    $<$<COMPILE_LANGUAGE:CXX>:/W3>
+    $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>>:/O2>
     $<$<COMPILE_LANGUAGE:CUDA>:
         --use_fast_math
         --extended-lambda

@@ -80,7 +80,7 @@ private:
 	Arrangement *arrangement_;
 	float particle_interval = 0.5f;
     HighResolutionTimerForWin frame_timer_;
-    bool get_detailed_time_ = true;
+    bool get_detailed_time_ = false;
     float total_time_ = 0.0f;
     float pre_time_, density_time_, force_time_;
     bool generate_mesh_;

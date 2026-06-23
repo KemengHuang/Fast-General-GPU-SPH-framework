@@ -10,6 +10,7 @@
 #include <device_launch_parameters.h>
 #include <thrust/sort.h>
 #include <thrust/device_ptr.h>
+#include <cub/device/device_scan.cuh>
 #include "cuda_prescan/scan.cuh"
 #include "io/gpu_model.cuh"
 #include "core/sph_utils.cuh"
@@ -412,7 +413,8 @@ void Arrangement::CountingSortCUDA_Two()
 
     CountingSort_Cell_Sum_two <<<num_block, num_thread >>>(d_p_offset_, d_hash_, cell_num_two, nump_, d_block_reqs_, numc_);
 
-    CountingSort_Offest_P(num_blockc, num_thread, cell_num_two, numCell);
+    cub::DeviceScan::InclusiveSum(d_cub_scan_temp_, cub_scan_temp_bytes_,
+                                  cell_num_two, cell_num_two, numCell);
 
     CountingSort_Result_two <<<num_block, num_thread >>>(d_p_offset_, d_hash_, hashp, cell_num_two, nump_, buff_list_.get_buff_list(), buff_temp_.get_buff_list());
 
@@ -443,7 +445,9 @@ void Arrangement::CountingSortCUDA_Two()
     //get_num_offset << <bck, num_thread >> >(d_start_index_, d_end_index_, d_cell_offset_, d_cell_nump_, numc_);
 
 
-    CUDA_SAFE_CALL(cudaMemcpy(&middle_value_, d_middle_value_, sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_SAFE_CALL(cudaMemcpyAsync(h_middle_value_pinned_, d_middle_value_, sizeof(int), cudaMemcpyDeviceToHost, 0));
+    CUDA_SAFE_CALL(cudaStreamSynchronize(0));
+    middle_value_ = *h_middle_value_pinned_;
 
    // std::cout << "asdfas9999999999999999999999999999999999999999999" << std::endl;
 
@@ -627,9 +631,11 @@ Arrangement::Arrangement(ParticleBufferObject &buff_list, ParticleBufferObject &
     CUDA_SAFE_CALL(cudaMalloc(&d_num_block_, sizeof(int)));
 
     CUDA_SAFE_CALL(cudaMalloc(&d_middle_value_, sizeof(int)));
+    CUDA_SAFE_CALL(cudaMallocHost(&h_middle_value_pinned_, sizeof(int)));
 
 
     CUDA_SAFE_CALL(cudaMalloc(&d_num_cta_, sizeof(int)));
+    CUDA_SAFE_CALL(cudaMallocHost(&h_num_cta_pinned_, sizeof(int)));
 
     CUDA_SAFE_CALL(cudaMalloc(&d_cell_offset_, (numc_+1) * sizeof(int)));
 
@@ -644,6 +650,18 @@ Arrangement::Arrangement(ParticleBufferObject &buff_list, ParticleBufferObject &
 
 	CUDA_SAFE_CALL(cudaMalloc(&d_cell_offset_M, (numc_ * 64 + 1) * sizeof(int)));
 	CUDA_SAFE_CALL(cudaMalloc(&d_cell_nump_M, (numc_ * 64 + 1) * sizeof(int)));
+
+    // Preallocate CUB scan temp storage once for the largest scan used on the frame path.
+    {
+        size_t bytes_for_cell_m = 0;
+        size_t bytes_for_block_reqs = 0;
+        cub::DeviceScan::ExclusiveSum(nullptr, bytes_for_cell_m,
+                                       d_cell_nump_M, d_cell_offset_M, numc_ * 64 + 1);
+        cub::DeviceScan::ExclusiveSum(nullptr, bytes_for_block_reqs,
+                                       d_block_reqs_, d_task_array_offset_32_, numc_);
+        cub_scan_temp_bytes_ = (bytes_for_cell_m > bytes_for_block_reqs) ? bytes_for_cell_m : bytes_for_block_reqs;
+        CUDA_SAFE_CALL(cudaMalloc(&d_cub_scan_temp_, cub_scan_temp_bytes_));
+    }
 
     preallocBlockSumsInt(numc_);
 
@@ -673,15 +691,23 @@ Arrangement::~Arrangement()
     CUDA_SAFE_CALL(cudaFree(d_block_task_));
     CUDA_SAFE_CALL(cudaFree(d_num_block_));
     CUDA_SAFE_CALL(cudaFree(d_middle_value_));
+    if (h_middle_value_pinned_) CUDA_SAFE_CALL(cudaFreeHost(h_middle_value_pinned_));
     //CUDA_SAFE_CALL(cudaFree(cell_num_));
     CUDA_SAFE_CALL(cudaFree(cell_num_two));
 
     CUDA_SAFE_CALL(cudaFree(d_num_cta_));
+    if (h_num_cta_pinned_) CUDA_SAFE_CALL(cudaFreeHost(h_num_cta_pinned_));
     //CUDA_SAFE_CALL(cudaFree(d_cell_offset_data));
     CUDA_SAFE_CALL(cudaFree(d_cell_offset_));
     CUDA_SAFE_CALL(cudaFree(d_cell_nump_));
 	CUDA_SAFE_CALL(cudaFree(d_cell_offset_M));
 	CUDA_SAFE_CALL(cudaFree(d_cell_nump_M));
+
+    if (d_cub_scan_temp_) {
+        CUDA_SAFE_CALL(cudaFree(d_cub_scan_temp_));
+        d_cub_scan_temp_ = nullptr;
+        cub_scan_temp_bytes_ = 0;
+    }
 
     deallocBlockSumsInt();
 
@@ -923,7 +949,9 @@ void Arrangement::arrangeBlockTasksFixedM(int *hash, int *celloff, int *cellnum,
 
 	knArrangeTasksFixedM << <num_block, num_thread >> >(hash, celloff, cellnum, d_task_array, d_num_cta_, d_cta_reqs, d_task_array_offset, grid_size_, cta_size, numc_);
 
-	CUDA_SAFE_CALL(cudaMemcpy(&h_num_cta_, d_num_cta_, sizeof(int), cudaMemcpyDeviceToHost));
+	CUDA_SAFE_CALL(cudaMemcpyAsync(h_num_cta_pinned_, d_num_cta_, sizeof(int), cudaMemcpyDeviceToHost, 0));
+	CUDA_SAFE_CALL(cudaStreamSynchronize(0));
+	h_num_cta_ = *h_num_cta_pinned_;
 
 	judgeTask << <ceil_int(h_num_cta_, num_thread), num_thread >> >(d_task_array, d_num_cta_);
 }
@@ -934,7 +962,9 @@ void Arrangement::arrangeBlockTasksFixed(BlockTask* d_task_array, int* d_cta_req
 
     knArrangeTasksFixed << <num_block, num_thread >> >(d_task_array, d_num_cta_, d_cta_reqs, d_task_array_offset, grid_size_, cta_size, numc_);
 
-    CUDA_SAFE_CALL(cudaMemcpy(&h_num_cta_, d_num_cta_, sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_SAFE_CALL(cudaMemcpyAsync(h_num_cta_pinned_, d_num_cta_, sizeof(int), cudaMemcpyDeviceToHost, 0));
+    CUDA_SAFE_CALL(cudaStreamSynchronize(0));
+    h_num_cta_ = *h_num_cta_pinned_;
 
 	judgeTask << <ceil_int(h_num_cta_, num_thread), num_thread >> >(d_task_array, d_num_cta_);
 
@@ -976,7 +1006,9 @@ void Arrangement::assignTasksFixedCTA() {
 //        prescanArrayRecursiveInt(d_task_array_offset_32_, d_block_reqs_, numc_, 0);
     knArrangeTasksFixed << <num_blockc, num_thread >> >(d_block_task_, d_num_cta_, d_block_reqs_, d_task_array_offset_32_, grid_size_, 32, numc_);
 
-    CUDA_SAFE_CALL(cudaMemcpy(&h_num_cta_, d_num_cta_, sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_SAFE_CALL(cudaMemcpyAsync(h_num_cta_pinned_, d_num_cta_, sizeof(int), cudaMemcpyDeviceToHost, 0));
+    CUDA_SAFE_CALL(cudaStreamSynchronize(0));
+    h_num_cta_ = *h_num_cta_pinned_;
 	judgeTask << <ceil_int(h_num_cta_, num_thread), num_thread >> >(d_block_task_, d_num_cta_);
 }
 
@@ -1218,7 +1250,8 @@ void Arrangement::CountingSort_O_M()
 	//CountingSort_Offest_P(num_blockc, num_thread, d_cell_offset_M, numCN + 1);
 
 
-	thrust::exclusive_scan(thrust::device_ptr<int>(d_cell_nump_M), thrust::device_ptr<int>(d_cell_nump_M) +numCN + 1, thrust::device_ptr<int>(d_cell_offset_M));
+	cub::DeviceScan::ExclusiveSum(d_cub_scan_temp_, cub_scan_temp_bytes_,
+                                  d_cell_nump_M, d_cell_offset_M, numCN + 1);
 
 	CountingSort_Result_M << <num_block, num_thread >> >(d_p_offset_p, d_p_offset_, d_hash_, hashp, d_cell_offset_M, nump_, buff_list_.get_buff_list(), buff_temp_.get_buff_list());
 
@@ -1294,11 +1327,14 @@ void Arrangement::CountingSortCUDA_Two9()
 
 
 
-    CountingSort_Offest_P(num_blockc, num_thread, cell_num_two, numCell);
+    cub::DeviceScan::InclusiveSum(d_cub_scan_temp_, cub_scan_temp_bytes_,
+                                  cell_num_two, cell_num_two, numCell);
     CountingSort_Result_two9 << <num_block, num_thread >> >(d_p_offset_p, d_hash_, hashp, cell_num_two, d_index_, nump_);
     unsigned int shared_mem_size = (num_thread + 1) * sizeof(int);
     knFindHybridModeMiddleValue << <num_block, num_thread, shared_mem_size >> >(numc_, d_middle_value_, hashp, nump_);
-    CUDA_SAFE_CALL(cudaMemcpy(&middle_value_, d_middle_value_, sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_SAFE_CALL(cudaMemcpyAsync(h_middle_value_pinned_, d_middle_value_, sizeof(int), cudaMemcpyDeviceToHost, 0));
+    CUDA_SAFE_CALL(cudaStreamSynchronize(0));
+    middle_value_ = *h_middle_value_pinned_;
 }
 
 void Arrangement::CountingSortCUDA_Two9_M()
@@ -1313,7 +1349,8 @@ void Arrangement::CountingSortCUDA_Two9_M()
 	//clean_data << <num_blockc, num_thread >> >(cell_num_two, numCell+1);
 	
 	CountingSort_Cell_Sum_two_M << <num_block, num_thread >> >(d_hash_p, d_p_offset_p, d_hash_, cell_num_two, nump_, d_block_reqs_, numc_);
-	CountingSort_Offest_P(num_blockc, num_thread, cell_num_two, numCell);
+	cub::DeviceScan::InclusiveSum(d_cub_scan_temp_, cub_scan_temp_bytes_,
+                                  cell_num_two, cell_num_two, numCell);
 
 	//thrust::inclusive_scan(thrust::device_ptr<int>(cell_num_two), thrust::device_ptr<int>(cell_num_two) +numCell, thrust::device_ptr<int>(cell_num_two));
 
@@ -1321,7 +1358,9 @@ void Arrangement::CountingSortCUDA_Two9_M()
 	CountingSort_Result_two9 << <num_block, num_thread >> >(d_p_offset_p, d_hash_p, hashp, cell_num_two, d_index_, nump_);
 	unsigned int shared_mem_size = (num_thread + 1) * sizeof(int);
 	knFindHybridModeMiddleValue << <num_block, num_thread, shared_mem_size >> >(numc_, d_middle_value_, hashp, nump_);
-	CUDA_SAFE_CALL(cudaMemcpy(&middle_value_, d_middle_value_, sizeof(int), cudaMemcpyDeviceToHost));
+	    CUDA_SAFE_CALL(cudaMemcpyAsync(h_middle_value_pinned_, d_middle_value_, sizeof(int), cudaMemcpyDeviceToHost, 0));
+    CUDA_SAFE_CALL(cudaStreamSynchronize(0));
+    middle_value_ = *h_middle_value_pinned_;
 }
 
 int Arrangement::arrangeHybridMode9(){
@@ -1337,7 +1376,8 @@ int Arrangement::arrangeHybridMode9M(){
 	gpu_model::calculateBlockRequirementHybridMode(cell_type, d_cell_nump_, d_block_reqs_, p_gpu_model_, d_cell_offset_, d_cell_nump_, grid_size_, 32);
 	CountingSortCUDA_Two9_M();
 	//prescanArrayRecursiveInt(d_task_array_offset_32_, d_block_reqs_, numc_, 0);
-	thrust::exclusive_scan(thrust::device_ptr<int>(d_block_reqs_), thrust::device_ptr<int>(d_block_reqs_) +numc_, thrust::device_ptr<int>(d_task_array_offset_32_));
+	cub::DeviceScan::ExclusiveSum(d_cub_scan_temp_, cub_scan_temp_bytes_,
+                                  d_block_reqs_, d_task_array_offset_32_, numc_);
 	arrangeBlockTasksFixedM(d_hash_, d_cell_offset_, d_cell_nump_, d_block_task_, d_block_reqs_, d_task_array_offset_32_, 32);
 	return (middle_value_ > nump_ || middle_value_ < 0) ? nump_ : middle_value_;
 }
@@ -1371,8 +1411,7 @@ int Arrangement::arrangeHybridMode(){
     //prescanArrayRecursiveInt(d_breqs_offset_, d_block_reqs_, numc_, 0);
     //arrangeBlockTasks();
     //CUDA_SAFE_CALL(cudaEventRecord(end));
-    //CUDA_SAFE_CALL(cudaMemcpy(&middle_value_, d_middle_value_, sizeof(int), cudaMemcpyDeviceToHost));
-
+    //CUDA_SAFE_CALL(cudaMemcpyAsync(h_middle_value_pinned_, d_middle_value_, sizeof(int), cudaMemcpyDeviceToHost, 0));
     //buff_list_.swapObj(buff_temp_);
 
     //CUDA_SAFE_CALL(cudaDeviceSynchronize());

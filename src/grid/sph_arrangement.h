@@ -100,8 +100,10 @@ private:
     float cell_size_;
     ushort3 grid_size_;
     int middle_value_ = 0;
+    int* h_middle_value_pinned_ = nullptr; // [1] pinned host buffer for async D2H of middle_value_
 
     int  h_num_cta_;
+    int* h_num_cta_pinned_ = nullptr;      // [1] pinned host buffer for async D2H of d_num_cta_
 
     int* d_num_cta_;
     int* d_cell_offset_;            // [numc] the offset in memory of the particles in each cell
@@ -135,6 +137,11 @@ private:
     BlockTask *d_block_task_;       // [numb]
     
     int *d_middle_value_;           // [1]for Hybrid Mode
+
+
+    // Persistent CUB device-scan temporary storage (replaces per-frame thrust allocations).
+    void *d_cub_scan_temp_ = nullptr;
+    size_t cub_scan_temp_bytes_ = 0;
 
     gpu_model::GPUModel *p_gpu_model_ = nullptr;
 };
