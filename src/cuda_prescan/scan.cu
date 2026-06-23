@@ -10,11 +10,11 @@
 */
 
 // includes, kernels
-#include "scan.cuh"
+#include "cuda_prescan/scan.cuh"
 #include <assert.h>
 #include <math.h>
-#include "..\cuda_call_check.h"
-#include "scan_kern.cuh"
+#include "core/cuda_call_check.h"
+#include "cuda_prescan/scan_kern.cuh"
 
 inline bool isPowerOfTwo(int n) { return ((n&(n - 1)) == 0); }
 

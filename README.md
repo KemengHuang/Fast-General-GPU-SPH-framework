@@ -65,7 +65,7 @@ build/Release/gsph.exe
 
 The default scene (`assets/scene_default.json`) generates ~3.94 million particles. For faster
 iteration during development, create a smaller scene file and change `kDefaultSceneFileName` in
-`src/sph_hybrid_system.cpp`, or add a command-line argument (not implemented yet).
+`src/simulation/sph_hybrid_system.cpp`, or add a command-line argument (not implemented yet).
 
 ### Controls
 
@@ -83,7 +83,14 @@ iteration during development, create a smaller scene file and change `kDefaultSc
 ├── assets/          runtime JSON scenes and textures
 ├── shaders/         GL vertex/fragment shaders
 ├── src/             source code
-│   └── cuda_prescan/    prefix-sum helpers included by sph_arrangement.cu
+│   ├── core/            shared utilities (CUDA helpers, math, parameters, timers)
+│   ├── cuda_prescan/    prefix-sum helpers included by grid/sph_arrangement.cu
+│   ├── grid/            uniform-grid construction and particle sorting
+│   ├── io/              GPU model loader/reader and statistics I/O
+│   ├── particle/        particle buffer definitions and management
+│   ├── render/          GLUT/GLEW renderer, camera, screenshot, textures
+│   ├── simulation/      high-level simulation, marching cubes, PCISPH helpers
+│   └── solver/          CUDA SPH kernels split by physics, plus dispatch
 ├── third_party/     third-party code (lodepng)
 ├── CMakeLists.txt
 └── README.md

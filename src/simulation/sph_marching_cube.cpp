@@ -6,13 +6,13 @@
 // Copyright (c) 2016 ruanjm. All rights reserved.
 //
 
-#include "sph_marching_cube.h"
+#include "simulation/sph_marching_cube.h"
 #include <cmath>
 #include <cstring>
 #include <fstream>
 #include <limits>
 #include <sstream>
-#include "cuda_math.cuh"
+#include "core/cuda_math.cuh"
 
 const int edgeTable[256] = {
 	0x0, 0x109, 0x203, 0x30a, 0x406, 0x50f, 0x605, 0x70c,

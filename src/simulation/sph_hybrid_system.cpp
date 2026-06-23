@@ -8,7 +8,7 @@
 
 #define _USE_MATH_DEFINES
 
-#include "sph_hybrid_system.h"
+#include "simulation/sph_hybrid_system.h"
 #include <math.h>
 #include <fstream>
 #include <sstream>
@@ -16,10 +16,10 @@
 #include <GL/freeglut.h>
 #include "json/json.h"
 #include "json/reader.h"
-#include "cuda_math.cuh"
-#include "sph_kernel.cuh"
-#include "sph_marching_cube.h"
-#include "pcisph_factor.h"   //sf add
+#include "core/cuda_math.cuh"
+#include "solver/kernel_dispatch.cuh"
+#include "simulation/sph_marching_cube.h"
+#include "simulation/pcisph_factor.h"
 
 
 namespace sph

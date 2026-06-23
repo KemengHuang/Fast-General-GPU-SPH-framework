@@ -6,8 +6,8 @@
 // Copyright (c) 2019 kmhuang and ruanjm. All rights reserved.
 //
 
-#ifndef _SPH_KERNEL_SHARED_DATA_CUH
-#define _SPH_KERNEL_SHARED_DATA_CUH
+#ifndef _SOLVER_KERNEL_COMMON_CUH_
+#define _SOLVER_KERNEL_COMMON_CUH_
 
 
 #define LOG_NUM_BANKS_MINE	 5
@@ -16,12 +16,54 @@
 
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
-#include "cuda_math.cuh"
-#include "sph_particle.h"
-#include "sph_utils.cuh"
+#include "core/cuda_math.cuh"
+#include "particle/particle_buffer.h"
+#include "core/sph_utils.cuh"
+#include "core/sph_parameter.h"
 
 namespace sph
 {
+// Thread/grid defaults (originally in sph_kernel.cu)
+const int kDefaultNumThreadSMS = 32;
+const int kDefulatMinBlocksSMS = 10;
+const int kDefaultNumThreadSMS2 = 64;
+const int kDefaultNumThreadTRA = 128;
+const int kNumberNeighborCells = 27;
+
+// Constant system parameter: single definition lives in device_context.cu
+extern __constant__ SystemParameter kDevSysPara;
+
+__device__ __host__
+inline float3 cal_rePos(const float4 &pos4, const float4 &pos3) {
+    return make_float3(pos3.x - pos4.x, pos3.y - pos4.y, pos3.z - pos4.z);
+}
+
+__device__ __host__
+inline unsigned int ceil_uint(unsigned int a, unsigned int b) { return (a + b - 1) / b; }
+
+__device__ __host__
+inline float powf_2(float base) { return base * base; }
+
+__device__ __host__
+inline float powf_3(float base) { return base * base * base; }
+
+__device__ __host__
+inline float powf_7(float base) { return base * base * base * base * base * base * base; }
+
+typedef unsigned int uint;
+
+#define COLORA(r,g,b,a)    ( (uint((a)*255.0f)<<24) | (uint((b)*255.0f)<<16) | (uint((g)*255.0f)<<8) | uint((r)*255.0f) )
+
+__device__ __host__
+inline ushort3 calCI(const ushort3& in){
+    ushort3 outd;
+    outd.x = in.x >> 2;
+    outd.y = in.y >> 2;
+    outd.z = in.z >> 2;
+    return outd;
+}
+
+
 
 const int kNumSharedData = 32;
 const int kNumNeighborCells = 64;
@@ -2474,4 +2516,4 @@ private:
 
 }
 
-#endif/*_SPH_KERNEL_SHARED_DATA_CUH*/
+#endif/*_SOLVER_KERNEL_COMMON_CUH_*/

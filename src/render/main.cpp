@@ -2,11 +2,11 @@
 #include <GL\freeglut.h>
 #include <sstream>
 #include <cuda_runtime.h>
-#include "screenshot.h"
-#include "sph_timer.h"
-#include "sph_data.h"
-#include "sph_hybrid_system.h"
-#include "app.h"
+#include "render/screenshot.h"
+#include "core/sph_timer.h"
+#include "render/camera_state.h"
+#include "simulation/sph_hybrid_system.h"
+#include "render/app.h"
 
 //#pragma comment(lib, "glew32.lib") 
 

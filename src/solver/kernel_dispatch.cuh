@@ -6,25 +6,16 @@
 // Copyright (c) 2019 kmhuang and ruanjm. All rights reserved.
 //
 
-#ifndef _SPH_KERNEL_CUH
-#define _SPH_KERNEL_CUH
+#ifndef _SOLVER_KERNEL_DISPATCH_CUH_
+#define _SOLVER_KERNEL_DISPATCH_CUH_
 
 #include <cuda_runtime.h>
-#include "sph_parameter.h"
-#include "sph_particle.h"
-#include "pcisph_factor.h"
+#include "core/sph_parameter.h"
+#include "particle/particle_buffer.h"
 
 namespace sph
 {
 
-struct ParticleIdxRange // [begin, end), zero-based numbering
-{
-    __host__ __device__
-    ParticleIdxRange(){}
-    __host__ __device__
-    ParticleIdxRange(int b, int e) : begin(b), end(e) {}
-    int begin, end;
-};
 
 
 void BuffInit(ParticleBufferList buff_list_n, int nm);
@@ -183,10 +174,8 @@ void computeCorrectivePressureForceHybrid128n(ParticleIdxRange range, ParticleBu
 void computeCorrectivePressureForceTRA(ParticleBufferList buff_list, int *cell_offset, int *cell_num, ParticleIdxRange range);
 
 //sf heat conduction-------------------
-void computeHeatFlux(ParticleBufferList buff_list, int *cell_offset, int *cell_num, BlockTask *block_task, int num_block);
 
-void computeTemperatureAndPhaseTransAndGetVis(ParticleBufferList buff_list, int *cell_offset, int *cell_num, BlockTask *block_task, int num_block);
 
 }
 
-#endif/*_SPH_KERNEL_CUH*/
+#endif/*_SOLVER_KERNEL_DISPATCH_CUH_*/

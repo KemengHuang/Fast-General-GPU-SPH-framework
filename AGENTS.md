@@ -13,7 +13,14 @@ GLUT/GLEW rendering, and JSON-based scene configuration.
 | Path | Purpose |
 |------|---------|
 | `src/` | All project source and headers |
-| `src/cuda_prescan/` | Prefix-sum helpers used by `sph_arrangement.cu` (`scan.cu` is compiled; `prefix_sum.cu` is header-guarded and included by `scan.cu`) |
+| `src/core/` | Shared utilities: CUDA helpers, math, parameters, timers |
+| `src/cuda_prescan/` | Prefix-sum helpers used by `grid/sph_arrangement.cu` (`scan.cu` is compiled; `prefix_sum.cu` is header-guarded and included by `scan.cu`) |
+| `src/grid/` | Uniform-grid construction and particle sorting (`sph_arrangement`) |
+| `src/io/` | GPU model loader/reader and statistics I/O |
+| `src/particle/` | Particle buffer definitions and management (`particle_buffer`) |
+| `src/render/` | GLUT/GLEW renderer, camera state, screenshot, shaders/textures |
+| `src/simulation/` | High-level simulation class, marching cubes, PCISPH factor helpers |
+| `src/solver/` | CUDA SPH kernels split by physics: density, force, integration, PCI-SPH, plus device context and host dispatch |
 | `assets/` | Runtime JSON scenes and statistics files (`scene_default.json`, `*_statistics.json`, `insts_latency.json`, `ball32.png`) |
 | `shaders/` | GL vertex/fragment shaders (currently `particle.vs` / `particle.fs`) |
 | `third_party/lodepng/` | Third-party PNG loader |
@@ -67,8 +74,8 @@ The executable expects the following files in its working directory:
 
 These paths are also hard-coded in:
 
-- `src/sph_hybrid_system.cpp` (`kDefaultSceneFileName`, `ball32.png`)
-- `src/gpu_model.cu` (statistics JSONs)
+- `src/simulation/sph_hybrid_system.cpp` (`kDefaultSceneFileName`, `ball32.png`)
+- `src/io/gpu_model.cu` (statistics JSONs)
 
 ## Important Implementation Notes
 

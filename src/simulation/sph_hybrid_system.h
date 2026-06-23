@@ -15,11 +15,11 @@
 #include <vector>
 #include <cuda_runtime.h>
 #include <GL/glew.h>
-#include "gl_texture.h"
-#include "high_resolution_timer.h"
-#include "sph_arrangement.cuh"
-#include "sph_parameter.h"
-#include "sph_particle.h"
+#include "render/gl_texture.h"
+#include "core/high_resolution_timer.h"
+#include "grid/sph_arrangement.h"
+#include "core/sph_parameter.h"
+#include "particle/particle_buffer.h"
 
 typedef unsigned int uint;
 

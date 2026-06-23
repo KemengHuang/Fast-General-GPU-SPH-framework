@@ -10,7 +10,7 @@
 #define _SPH_MARCHING_CUBE_H
 
 #include <vector_functions.h>
-#include "sph_parameter.h"
+#include "core/sph_parameter.h"
 
 namespace sph
 {

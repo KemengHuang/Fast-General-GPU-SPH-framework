@@ -6,13 +6,13 @@
 // Copyright (c) 2019 kmhuang and ruanjm. All rights reserved.
 //
 
-#include "sph_arrangement.cuh"
+#include "grid/sph_arrangement.h"
 #include <device_launch_parameters.h>
 #include <thrust/sort.h>
 #include <thrust/device_ptr.h>
 #include "cuda_prescan/scan.cuh"
-#include "gpu_model.cuh"
-#include "sph_utils.cuh"
+#include "io/gpu_model.cuh"
+#include "core/sph_utils.cuh"
 
 #include<fstream>
 

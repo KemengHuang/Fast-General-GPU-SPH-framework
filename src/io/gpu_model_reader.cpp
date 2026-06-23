@@ -6,7 +6,7 @@
 // Copyright (c) 2019 kmhuang and ruanjm. All rights reserved.
 //
 
-#include "gpu_model_reader.h"
+#include "io/gpu_model_reader.h"
 #include <fstream>
 #include <iostream>
 #include "json/json.h"

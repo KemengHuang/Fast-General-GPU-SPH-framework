@@ -6,13 +6,13 @@
 // Copyright (c) 2019 kmhuang and ruanjm. All rights reserved.
 //
 
-#include "gpu_model.cuh"
+#include "io/gpu_model.cuh"
 #include <device_launch_parameters.h>
-#include "cuda_call_check.h"
-#include "cuda_math.cuh"
-#include "gpu_model.h"
-#include "gpu_model_reader.h"
-#include "sph_utils.cuh"
+#include "core/cuda_call_check.h"
+#include "core/cuda_math.cuh"
+#include "io/gpu_model.h"
+#include "io/gpu_model_reader.h"
+#include "core/sph_utils.cuh"
 
 namespace gpu_model
 {

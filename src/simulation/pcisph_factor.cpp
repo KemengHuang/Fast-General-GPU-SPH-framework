@@ -3,8 +3,8 @@
 // Copyright (c) 2023 KMHuang and ruanjm. All right reserved.
 //
 
-#include "pcisph_factor.h"
-#include "sph_hybrid_system.h"
+#include "simulation/pcisph_factor.h"
+#include "solver/kernel_dispatch.cuh"
 
 namespace sph
 {

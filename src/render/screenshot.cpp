@@ -2,7 +2,7 @@
 // screenshot.cpp
 //
 
-#include "screenshot.h"
+#include "render/screenshot.h"
 
 #include <windows.h>
 #include <GL/gl.h>

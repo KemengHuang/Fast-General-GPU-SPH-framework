@@ -5,8 +5,7 @@
 #define _PCISPH_FACTOR_H
 
 #include <vector>
-#include "sph_kernel.cuh"
-#include "sph_hybrid_system.h"
+#include "particle/particle_buffer.h"
 
 namespace sph
 {

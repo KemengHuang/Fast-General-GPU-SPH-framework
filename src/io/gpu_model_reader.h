@@ -10,7 +10,7 @@
 #define _GPU_MODEL_READER_H
 
 #include <string>
-#include "gpu_model.h"
+#include "io/gpu_model.h"
 
 namespace gpu_model
 {

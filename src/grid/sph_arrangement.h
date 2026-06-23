@@ -6,10 +6,10 @@
 // Copyright (c) 2019 kmhuang and ruanjm. All rights reserved.
 //
 
-#ifndef _SPH_ARRANGEMENT_CUH
-#define _SPH_ARRANGEMENT_CUH
+#ifndef _SPH_ARRANGEMENT_H
+#define _SPH_ARRANGEMENT_H
 
-#include "sph_particle.h"
+#include "particle/particle_buffer.h"
 
 namespace gpu_model { struct GPUModel; }
 

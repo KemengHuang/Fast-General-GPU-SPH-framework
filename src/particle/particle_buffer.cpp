@@ -6,7 +6,7 @@
 // Copyright (c) 2019 kmhuang and ruanjm. All rights reserved.
 //
 
-#include "sph_particle.h"
+#include "particle/particle_buffer.h"
 
 namespace sph
 {
