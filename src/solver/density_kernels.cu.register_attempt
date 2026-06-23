@@ -2,14 +2,6 @@
 
 #include "solver/kernel_common.cuh"
 
-// Switch for the density SMS different-cell path:
-// 0 = original shared-memory path for both same-cell and different-cell tasks
-// 1 = register-load + warp-local shared exchange for different-cell tasks,
-//     shared-memory path kept for same-cell tasks (dominant case)
-#ifndef DENSITY_SMS_USE_REGISTER_PATH
-#define DENSITY_SMS_USE_REGISTER_PATH 1
-#endif
-
 namespace sph {
 __device__
 inline void knComputeCellDensitySMS64(const int& isSame, SimDenSharedData128 *sdata, CDAPData *self_data, int read_num)
@@ -142,7 +134,7 @@ void knComputeCellDensityTRA(ParticleBufferList &buff_list, CDAPData *self_data,
 
     for (size_t i = start_idx; i < end_idx; ++i)
     {
-        float4 neighbor_pos = __ldg(&buff_list.position_d[i]);
+        float4 neighbor_pos = buff_list.position_d[i];
         //      float4 neighbor_pos = buff_list.position_d[i];
 
 
@@ -274,24 +266,100 @@ void knComputeMixDensityTRA(ParticleBufferList buff_list, int *cell_offset, int 
 
 }
 
-#if DENSITY_SMS_USE_REGISTER_PATH
 __device__ __forceinline__
-void knComputeCellDensityReg64(float4 *shared_pos, int warp_base, CDAPData *self_data, int read_num)
+float4 shfl_float4(unsigned int mask, float4 v, int srcLane)
 {
-    // Ensure the loop bound is uniform across the warp.
-    read_num = __shfl_sync(0xFFFFFFFF, read_num, 0);
-    #pragma unroll 4
-    for (int src = 0; src < read_num; ++src)
-    {
-        float4 neighbor_position = shared_pos[warp_base + src];
-        float dis_2 = distance_square(self_data->pos, neighbor_position);
-        if (kDevSysPara.kernel_2 < dis_2 || kFloatSmall > dis_2)
-            continue;
-        float h2_r2 = kDevSysPara.kernel_2 - dis_2;
-        self_data->pos.w += h2_r2 * h2_r2 * h2_r2;
-    }
+    v.x = __shfl_sync(mask, v.x, srcLane);
+    v.y = __shfl_sync(mask, v.y, srcLane);
+    v.z = __shfl_sync(mask, v.z, srcLane);
+    v.w = __shfl_sync(mask, v.w, srcLane);
+    return v;
 }
-#endif
+
+__device__ __forceinline__
+void computeNeighborCellInfoReg(
+    int cell_idx,
+    const ushort3 &cellpos,
+    int minx, int maxx, int minz, int maxz,
+    const int * __restrict__ cell_offset_M,
+    const int * __restrict__ cell_offset,
+    const int * __restrict__ cell_num,
+    const ushort3 &grid_size,
+    int &out_offset, int &out_nump, int &out_begin)
+{
+    int dy = cell_idx % 3 - 1;
+    int dz = (cell_idx / 3) % 3 - 1;
+    ushort3 neighbor_pos = cellpos + make_ushort3(-1, dy, dz);
+    if (neighbor_pos.y < 0 || neighbor_pos.y >= grid_size.y ||
+        neighbor_pos.z < 0 || neighbor_pos.z >= grid_size.z) {
+        out_offset = 0;
+        out_nump = 0;
+        out_begin = -1;
+        return;
+    }
+
+    int nid_left = CellPos2CellIdx(neighbor_pos, grid_size);
+    ++neighbor_pos.x;
+    int nid_mid = CellPos2CellIdx(neighbor_pos, grid_size);
+    ++neighbor_pos.x;
+    int nid_right = CellPos2CellIdx(neighbor_pos, grid_size);
+
+    out_offset = (kInvalidCellIdx == nid_left)
+        ? __ldg(&cell_offset[nid_mid])
+        : __ldg(&cell_offset_M[(nid_left << 6) + (minx << 4)]);
+
+    int my_cell_nump = __ldg(&cell_num[nid_mid]);
+    if (kInvalidCellIdx != nid_left) {
+        my_cell_nump += __ldg(&cell_offset[nid_mid]) - __ldg(&cell_offset_M[(nid_left << 6) + (minx << 4)]);
+    }
+    if (maxx == 3) {
+        if (kInvalidCellIdx != nid_right) {
+            my_cell_nump += __ldg(&cell_num[nid_right]);
+        }
+    } else {
+        if (kInvalidCellIdx != nid_right) {
+            my_cell_nump += __ldg(&cell_offset_M[(nid_right << 6) + ((maxx + 1) << 4)])
+                           - __ldg(&cell_offset_M[(nid_right << 6)]);
+        }
+    }
+
+    int leftl = (kInvalidCellIdx == nid_left ? 0 : 4 - minx);
+    int rightl = (kInvalidCellIdx == nid_right ? 0 : 1 + maxx);
+    int leng = 4 + leftl + rightl;
+
+    int begin_ = -1;
+    if (my_cell_nump > leng * 22) {
+        if ((minz > 0) && ((cell_idx % 9) < 3)) {
+            begin_ = (kInvalidCellIdx == nid_left)
+                ? (nid_mid << 6)
+                : ((nid_left << 6) + (minx << 4));
+            if (my_cell_nump > 0) {
+                int lay = 0;
+                while ((__ldg(&cell_offset_M[begin_ + ((lay + 1) << 4)]) -
+                        __ldg(&cell_offset_M[begin_ + (minz << 2) + (lay << 4)])) == 0) {
+                    ++lay;
+                    if (lay >= leng) { my_cell_nump = 0; break; }
+                }
+            }
+        }
+        else if ((maxz < 3) && ((cell_idx % 9) > 5)) {
+            begin_ = (kInvalidCellIdx == nid_left)
+                ? (nid_mid << 6)
+                : ((nid_left << 6) + (minx << 4));
+            if (my_cell_nump > 0) {
+                int lay = 0;
+                while ((__ldg(&cell_offset_M[begin_ + (lay << 4) + ((maxz + 1) << 2)]) -
+                        __ldg(&cell_offset_M[begin_ + (lay << 4)])) == 0) {
+                    ++lay;
+                    if (lay >= leng) { my_cell_nump = 0; break; }
+                }
+            }
+        }
+    }
+
+    out_nump = my_cell_nump;
+    out_begin = begin_;
+}
 
 __global__ //__launch_bounds__(64, 10)
 void kncomputeDensityHybrid128n(int *cell_offset_M, ParticleIdxRange range, ParticleBufferList buff_list, int *cindex, int *cell_offset, int *cell_num, BlockTask *block_task, int bt_offset)
@@ -383,106 +451,204 @@ void kncomputeDensityHybrid128n(int *cell_offset_M, ParticleIdxRange range, Part
 		float denv = (5000 - self_data.pos.w) / 6000;
 		buff_list.color[self_idx] = COLORA(1.0f*denv, 0.f, 1.0*denv, 1.0);
     }
-    else{
+    else {
 
         int t = blockIdx.x - bt_offset;
-		int n = (t << 1) + (threadIdx.x >> 5);
+        int n = (t << 1) + (threadIdx.x >> 5);
         BlockTask bt = block_task[n];
-        int isSame = 0;// bt.isSame;
 
         int cell_id = bt.cellid;
-		ushort3 cellpos = CellIdx2CellPos(cell_id, kDevSysPara.grid_size);
+        ushort3 cellpos = CellIdx2CellPos(cell_id, kDevSysPara.grid_size);
 
-        register int self_idx = cell_offset[cell_id] + bt.p_offset + threadIdx.x % 32;
-
+        register int self_idx = cell_offset[cell_id] + bt.p_offset + (threadIdx.x & 31);
         register int temp_cell_end = cell_offset[cell_id] + cell_num[cell_id];
 
         register CDAPData data;
-
-        bool active = (self_idx < temp_cell_end);
-        if (active)   // initialize self data
+        const bool active = (self_idx < temp_cell_end);
+        if (active)
         {
             data.pos = __ldg(&buff_list.position_d[self_idx]);
-            data.pos.w = 0;
+            data.pos.w = 0.0f;
         }
 
-#if DENSITY_SMS_USE_REGISTER_PATH
-        // Register-load + warp-local shared exchange for different-cell tasks,
-        // shared-memory path kept for same-cell tasks (dominant case).
-        if (isSame == 1)
-        {
-            __shared__ SimDenSharedData128 sdata;
-			sdata.initialize(bt.zzi, bt.zzz, bt.xxi, bt.xxx, cell_offset_M, isSame, cell_offset, cell_num, cellpos, kDevSysPara.grid_size);
-            while (true)
-            {
-				__syncthreads();
-				int r = sdata.read32Data(cell_offset_M, isSame, buff_list);
-				__syncthreads();
-                if (0 == r) break;  // neighbor cells read complete
-                if (active)
-                {
-					knComputeCellDensitySMS64(isSame, &sdata, &data, r);
-                }
-            }
-        }
-        else
-        {
-            // A warp whose p_offset is past the cell has no self-particles.
-            // All threads still participate in initialize() because it uses
-            // __syncthreads(), but the empty warp can skip the iteration loop.
-            bool warp_has_work = (bt.p_offset < cell_num[cell_id]);
+        const int lane = threadIdx.x & 31;
 
-            __shared__ SimDenRegData128 sdata;
-			sdata.initialize(bt.zzi, bt.zzz, bt.xxi, bt.xxx, cell_offset_M, isSame, cell_offset, cell_num, cellpos, kDevSysPara.grid_size);
-            __shared__ float4 shared_pos[64];
-            if (warp_has_work)
-            {
-                while (true)
-                {
-				    float4 my_pos = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-				    int r = sdata.read32DataReg(cell_offset_M, isSame, buff_list, my_pos);
-                    if (0 == r) break;  // neighbor cells read complete
-                    shared_pos[threadIdx.x] = my_pos;
-                    __syncwarp();
-                    int warp_base = (threadIdx.x >> 5) << 5;
-				    knComputeCellDensityReg64(shared_pos, warp_base, &data, r);
-                    __syncwarp();
-                }
+        // Per-warp neighbor-iteration state. Only lane 0 maintains it;
+        // the values needed by all threads are broadcast via shuffle.
+        int cell_off = 0;
+        int cell_nump = 0;
+        int cell_begin_ = -1;
+        int length = 0;
+        int iminz = 0;
+        int imaxz = 0;
+        int curr_cell = 9;
+        int off_in_cell = 0;
+        int depth = 0;
+
+        if (lane == 0)
+        {
+            int minx = bt.xxi;
+            int maxx = bt.xxx;
+            iminz = bt.zzi;
+            imaxz = bt.zzz;
+
+            ushort3 left_pos = cellpos + make_ushort3(-1, 0, 0);
+            int nid_left = CellPos2CellIdx(left_pos, kDevSysPara.grid_size);
+            ushort3 right_pos = cellpos + make_ushort3(1, 0, 0);
+            int nid_right = CellPos2CellIdx(right_pos, kDevSysPara.grid_size);
+            int leftl = (kInvalidCellIdx == nid_left ? 0 : 4 - minx);
+            int rightl = (kInvalidCellIdx == nid_right ? 0 : 1 + maxx);
+            length = 4 + leftl + rightl;
+
+            curr_cell = 0;
+            while (curr_cell < 9) {
+                computeNeighborCellInfoReg(curr_cell, cellpos, minx, maxx, iminz, imaxz,
+                    cell_offset_M, cell_offset, cell_num, kDevSysPara.grid_size,
+                    cell_off, cell_nump, cell_begin_);
+                if (cell_nump > 0) break;
+                ++curr_cell;
             }
         }
-#else
-        // Original shared-memory SMS path for both same-cell and different-cell tasks.
-        __shared__ SimDenSharedData128 sdata;
-		sdata.initialize(bt.zzi, bt.zzz, bt.xxi, bt.xxx, cell_offset_M, isSame, cell_offset, cell_num, cellpos, kDevSysPara.grid_size);
+
         while (true)
         {
-			__syncthreads();
-			int r = sdata.read32Data(cell_offset_M, isSame, buff_list);
-			__syncthreads();
-            if (0 == r) break;  // neighbor cells read complete
-            if (active)
+            int num_read = 0;
+            int base = 0;
+            if (lane == 0)
             {
-				knComputeCellDensitySMS64(isSame, &sdata, &data, r);
+                if (curr_cell < 9)
+                {
+                    int minx = bt.xxi;
+                    int maxx = bt.xxx;
+                    if (cell_begin_ == -1)
+                    {
+                        int remain = cell_nump - off_in_cell;
+                        num_read = remain > 32 ? 32 : remain;
+                        base = cell_off + off_in_cell;
+                        if (remain > 32) {
+                            off_in_cell += 32;
+                        } else {
+                            off_in_cell = 0;
+                            depth = 0;
+                            ++curr_cell;
+                            while (curr_cell < 9) {
+                                computeNeighborCellInfoReg(curr_cell, cellpos, minx, maxx, iminz, imaxz,
+                                    cell_offset_M, cell_offset, cell_num, kDevSysPara.grid_size,
+                                    cell_off, cell_nump, cell_begin_);
+                                if (cell_nump > 0) break;
+                                ++curr_cell;
+                            }
+                        }
+                    }
+                    else if ((iminz > 0) && ((curr_cell % 9) < 3))
+                    {
+                        int lay = depth;
+                        while ((__ldg(&cell_offset_M[cell_begin_ + ((lay + 1) << 4)]) -
+                                __ldg(&cell_offset_M[cell_begin_ + (iminz << 2) + (lay << 4)])) == 0) {
+                            ++lay;
+                        }
+                        depth = lay;
+                        int celloff = __ldg(&cell_offset_M[cell_begin_ + (iminz << 2) + (lay << 4)]);
+                        int remain = __ldg(&cell_offset_M[cell_begin_ + ((lay + 1) << 4)]) - celloff - off_in_cell;
+                        num_read = remain > 32 ? 32 : remain;
+                        base = celloff + off_in_cell;
+                        if (remain > 32) {
+                            off_in_cell += 32;
+                        } else {
+                            off_in_cell = 0;
+                            ++depth;
+                            if (depth < length) {
+                                while ((__ldg(&cell_offset_M[cell_begin_ + ((depth + 1) << 4)]) -
+                                        __ldg(&cell_offset_M[cell_begin_ + (iminz << 2) + (depth << 4)])) == 0) {
+                                    ++depth;
+                                    if (depth >= length) break;
+                                }
+                            }
+                            if (depth >= length) {
+                                depth = 0;
+                                ++curr_cell;
+                                while (curr_cell < 9) {
+                                    computeNeighborCellInfoReg(curr_cell, cellpos, minx, maxx, iminz, imaxz,
+                                        cell_offset_M, cell_offset, cell_num, kDevSysPara.grid_size,
+                                        cell_off, cell_nump, cell_begin_);
+                                    if (cell_nump > 0) break;
+                                    ++curr_cell;
+                                }
+                            }
+                        }
+                    }
+                    else if ((imaxz < 3) && ((curr_cell % 9) > 5))
+                    {
+                        int lay = depth;
+                        while ((__ldg(&cell_offset_M[cell_begin_ + (lay << 4) + ((imaxz + 1) << 2)]) -
+                                __ldg(&cell_offset_M[cell_begin_ + (lay << 4)])) == 0) {
+                            ++lay;
+                        }
+                        depth = lay;
+                        int celloff = __ldg(&cell_offset_M[cell_begin_ + (lay << 4)]);
+                        int remain = __ldg(&cell_offset_M[cell_begin_ + (lay << 4) + ((imaxz + 1) << 2)]) - celloff - off_in_cell;
+                        num_read = remain > 32 ? 32 : remain;
+                        base = celloff + off_in_cell;
+                        if (remain > 32) {
+                            off_in_cell += 32;
+                        } else {
+                            off_in_cell = 0;
+                            ++depth;
+                            if (depth < length) {
+                                while ((__ldg(&cell_offset_M[cell_begin_ + (depth << 4) + ((imaxz + 1) << 2)]) -
+                                        __ldg(&cell_offset_M[cell_begin_ + (depth << 4)])) == 0) {
+                                    ++depth;
+                                    if (depth >= length) break;
+                                }
+                            }
+                            if (depth >= length) {
+                                depth = 0;
+                                ++curr_cell;
+                                while (curr_cell < 9) {
+                                    computeNeighborCellInfoReg(curr_cell, cellpos, minx, maxx, iminz, imaxz,
+                                        cell_offset_M, cell_offset, cell_num, kDevSysPara.grid_size,
+                                        cell_off, cell_nump, cell_begin_);
+                                    if (cell_nump > 0) break;
+                                    ++curr_cell;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            num_read = __shfl_sync(0xFFFFFFFF, num_read, 0);
+            if (num_read == 0) break;
+            base = __shfl_sync(0xFFFFFFFF, base, 0);
+
+            float4 my_neighbor = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+            if (lane < num_read) {
+                my_neighbor = __ldg(&buff_list.position_d[base + lane]);
+            }
+
+            for (int src = 0; src < num_read; ++src)
+            {
+                float4 n = shfl_float4(0xFFFFFFFF, my_neighbor, src);
+                if (active)
+                {
+                    float dis2 = distance_square(data.pos, n);
+                    if (dis2 < kFloatSmall || dis2 > kDevSysPara.kernel_2) continue;
+                    float h2_r2 = kDevSysPara.kernel_2 - dis2;
+                    data.pos.w += h2_r2 * h2_r2 * h2_r2;
+                }
             }
         }
-#endif
 
-        if (self_idx < temp_cell_end)
+        if (active)
         {
             data.pos.w *= kDevSysPara.mass * kDevSysPara.poly6_value;
             data.pos.w += kDevSysPara.self_density;
             buff_list.position_d[self_idx].w = data.pos.w < kFloatSmall ? kDevSysPara.rest_density : data.pos.w;
             buff_list.evaluated_velocity[self_idx].w = (powf_7(__fdividef(data.pos.w, kDevSysPara.rest_density)) - 1) * kDevSysPara.gas_constant;
 
-			float denv = (5000 - data.pos.w) / 6000;
-			if (isSame == 1){
-				buff_list.color[self_idx] = COLORA(0.f, 1.0f*denv, 1.0*denv, 1.0);
-			}
-			else{
-				buff_list.color[self_idx] = COLORA(1.0f*denv, 1.0f*denv, 0.f, 1.0);
-			}
+            float denv = (5000 - data.pos.w) / 6000;
+            buff_list.color[self_idx] = COLORA(1.0f*denv, 1.0f*denv, 0.0f, 1.0);
         }
     }
 }
-
 }
