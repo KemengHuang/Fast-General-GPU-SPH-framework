@@ -155,16 +155,15 @@ void knComputeCellDensityTRA9(ParticleBufferList &buff_list, CDAPData *self_data
     int end_idx = cell_offset + cell_num;
     for (size_t i = cell_offset; i < end_idx; ++i)
     {
-        float4 neighbor_pos = buff_list.position_d[i];
-      //  float4 neighbor_pos = buff_list.position_d[i];
+        float4 neighbor_pos = __ldg(&buff_list.position_d[i]);
 
-
-        float3 rel_pos = cal_rePos(neighbor_pos, self_data->pos);// self_data->pos - neighbor_pos;
+        float3 rel_pos = cal_rePos(neighbor_pos, self_data->pos);
         float dis_2 = rel_pos.x * rel_pos.x + rel_pos.y * rel_pos.y + rel_pos.z * rel_pos.z;
 
         if (dis_2 < kFloatSmall || dis_2 > kDevSysPara.kernel_2) continue;
 
-        self_data->pos.w += __powf(kDevSysPara.kernel_2 - dis_2, 3);
+        float h2_r2 = kDevSysPara.kernel_2 - dis_2;
+        self_data->pos.w += h2_r2 * h2_r2 * h2_r2;
     }
 
     //    return total_density;
@@ -272,10 +271,10 @@ void kncomputeDensityHybrid128n(int *cell_offset_M, ParticleIdxRange range, Part
     if (blockIdx.x < bt_offset){
         int self_idx = threadIdx.x + __umul24(blockIdx.x, blockDim.x) + range.begin;
         if (self_idx >= range.end) return;
-        self_idx = cindex[self_idx];
+        self_idx = __ldg(&cindex[self_idx]);
 
         register CDAPData self_data;
-        self_data.pos = buff_list.position_d[self_idx];
+        self_data.pos = __ldg(&buff_list.position_d[self_idx]);
   //      self_data.pos =buff_list.position_d[self_idx];
         self_data.pos.w = 0;
         ushort3 cell_posc = ParticlePos2CellPosM(self_data.pos, kDevSysPara.cell_size);
@@ -314,14 +313,14 @@ void kncomputeDensityHybrid128n(int *cell_offset_M, ParticleIdxRange range, Part
 
 
 				cell_offset_ =
-					kInvalidCellIdx == nid_left ? cell_offset[nid_mid] : cell_offset_M[(nid_left << 6) + (xxx << 4)];
-				cell_nump_ = cell_num[nid_mid];
-				if (kInvalidCellIdx != nid_left) cell_nump_ += cell_offset[nid_mid] - cell_offset_M[(nid_left << 6) + (xxx << 4)];//cell_nump[nid_left];
+					kInvalidCellIdx == nid_left ? __ldg(&cell_offset[nid_mid]) : __ldg(&cell_offset_M[(nid_left << 6) + (xxx << 4)]);
+				cell_nump_ = __ldg(&cell_num[nid_mid]);
+				if (kInvalidCellIdx != nid_left) cell_nump_ += __ldg(&cell_offset[nid_mid]) - __ldg(&cell_offset_M[(nid_left << 6) + (xxx << 4)]);
 				if (xxx == 3){
-					if (kInvalidCellIdx != nid_right) cell_nump_ += cell_num[nid_right];
+					if (kInvalidCellIdx != nid_right) cell_nump_ += __ldg(&cell_num[nid_right]);
 				}
 				else{
-					if (kInvalidCellIdx != nid_right) cell_nump_ += cell_offset_M[(nid_right << 6) + ((xxx + 1) << 4)] - cell_offset_M[(nid_right << 6)];//cell_nump[nid_right];
+					if (kInvalidCellIdx != nid_right) cell_nump_ += __ldg(&cell_offset_M[(nid_right << 6) + ((xxx + 1) << 4)]) - __ldg(&cell_offset_M[(nid_right << 6)]);
 				}
 				//cell_nump_[kk] = my_cell_nump;
 
@@ -351,9 +350,9 @@ void kncomputeDensityHybrid128n(int *cell_offset_M, ParticleIdxRange range, Part
         self_data.pos.w *= kDevSysPara.mass * kDevSysPara.poly6_value;
         self_data.pos.w += kDevSysPara.self_density;
         buff_list.position_d[self_idx].w = self_data.pos.w;
-        buff_list.evaluated_velocity[self_idx].w = (__powf(__fdividef(self_data.pos.w, kDevSysPara.rest_density), 7) - 1) * kDevSysPara.gas_constant;
+        buff_list.evaluated_velocity[self_idx].w = (powf_7(__fdividef(self_data.pos.w, kDevSysPara.rest_density)) - 1) * kDevSysPara.gas_constant;
 
-		float denv = (5000 - buff_list.position_d[self_idx].w) / 6000;
+		float denv = (5000 - self_data.pos.w) / 6000;
 		buff_list.color[self_idx] = COLORA(1.0f*denv, 0.f, 1.0*denv, 1.0);
     }
     else{
@@ -379,7 +378,7 @@ void kncomputeDensityHybrid128n(int *cell_offset_M, ParticleIdxRange range, Part
 
         if (self_idx < temp_cell_end)   // initialize self data
         {
-            data.pos = buff_list.position_d[self_idx];
+            data.pos = __ldg(&buff_list.position_d[self_idx]);
         //    data.pos = buff_list.position_d[self_idx];
             data.pos.w = 0;
         }
@@ -405,7 +404,7 @@ void kncomputeDensityHybrid128n(int *cell_offset_M, ParticleIdxRange range, Part
             buff_list.position_d[self_idx].w = data.pos.w < kFloatSmall ? kDevSysPara.rest_density : data.pos.w;
             buff_list.evaluated_velocity[self_idx].w = (powf_7(__fdividef(data.pos.w, kDevSysPara.rest_density)) - 1) * kDevSysPara.gas_constant;
 
-			float denv = (5000 - buff_list.position_d[self_idx].w) / 6000;
+			float denv = (5000 - data.pos.w) / 6000;
 			if (isSame == 1){
 				buff_list.color[self_idx] = COLORA(0.f, 1.0f*denv, 1.0*denv, 1.0);
 			}

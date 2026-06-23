@@ -186,7 +186,8 @@ void renderBitmapString(float x, float y, float z, void *font, const std::string
 
 /****************************** HybridSystem ******************************/
 
-HybridSystem::HybridSystem(const float3 &real_world_side, const float3 &sim_origin)
+HybridSystem::HybridSystem(const float3 &real_world_side, const float3 &sim_origin, bool headless)
+    : headless_mode_(headless)
 {
 	Scene scene;
     defaultInitializeSPHSysPara(sys_para_, &scene);
@@ -195,26 +196,31 @@ HybridSystem::HybridSystem(const float3 &real_world_side, const float3 &sim_orig
                                       real_world_side.z / sys_para_.world_size.z);
     sys_para_.sim_origin = sim_origin;
 
+    // Headless benchmark mode needs timing events, so decide before creating them.
+    get_detailed_time_ = headless_mode_;
+
     initializeKernel();
     createPersistentCudaResources();
 
 	initializeScene(kDefaultSceneFileName, scene);
 
-    // render 
-    particle_texture_.loadPNG("assets/ball32.png");
-    glGenBuffers(1, &position_vbo_);
-    glGenBuffers(1, &color_vbo_);
+    if (!headless_mode_)
+    {
+        // render
+        particle_texture_.loadPNG("assets/ball32.png");
+        glGenBuffers(1, &position_vbo_);
+        glGenBuffers(1, &color_vbo_);
 
-    // Allocate GPU storage once, then register the VBOs with CUDA so the
-    // particle data can be copied directly from device memory each frame.
-    glBindBuffer(GL_ARRAY_BUFFER, position_vbo_);
-    glBufferData(GL_ARRAY_BUFFER, nump_ * sizeof(float3), nullptr, GL_DYNAMIC_DRAW);
-    glBindBuffer(GL_ARRAY_BUFFER, color_vbo_);
-    glBufferData(GL_ARRAY_BUFFER, nump_ * sizeof(uint), nullptr, GL_DYNAMIC_DRAW);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-    registerGraphicsResources();
+        // Allocate GPU storage once, then register the VBOs with CUDA so the
+        // particle data can be copied directly from device memory each frame.
+        glBindBuffer(GL_ARRAY_BUFFER, position_vbo_);
+        glBufferData(GL_ARRAY_BUFFER, nump_ * sizeof(float3), nullptr, GL_DYNAMIC_DRAW);
+        glBindBuffer(GL_ARRAY_BUFFER, color_vbo_);
+        glBufferData(GL_ARRAY_BUFFER, nump_ * sizeof(uint), nullptr, GL_DYNAMIC_DRAW);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        registerGraphicsResources();
+    }
 
-    get_detailed_time_ = true;
     generate_mesh_ = false;
     add_smoke_ = false;
 }
@@ -281,7 +287,7 @@ void HybridSystem::tick()
     // If CUDA-GL interop is unavailable we fall back to asynchronous D2H
     // copies that the draw path will synchronize on.
     CUDA_SAFE_CALL(cudaEventRecord(compute_done_event_, 0));
-    if (!vbo_resources_registered_)
+    if (!headless_mode_ && !vbo_resources_registered_)
     {
         CUDA_SAFE_CALL(cudaStreamWaitEvent(copy_stream_, compute_done_event_, 0));
         CUDA_SAFE_CALL(cudaMemcpyAsync(host_buff_.get_buff_list().final_position,
@@ -294,8 +300,7 @@ void HybridSystem::tick()
     }
 
     timer.set_end();
-
-
+    total_time_ = static_cast<float>(timer.get_millisecond());
 
     if (get_detailed_time_)
     {
@@ -315,7 +320,60 @@ void HybridSystem::tick()
     }
 }
 
+void HybridSystem::runBenchmark(int frames)
+{
+    if (frames <= 0) return;
 
+    // Make sure the simulation is running and detailed timing is enabled.
+    if (!is_running_) setPause();
+    get_detailed_time_ = true;
+    if (!tick_events_created_)
+    {
+        destroyPersistentCudaResources();
+        createPersistentCudaResources();
+    }
+
+    double total_arrange = 0.0;
+    double total_density = 0.0;
+    double total_force = 0.0;
+    double total_frame = 0.0;
+
+    // Warm-up: run a few frames so the first-allocation / cache effects don't dominate.
+    for (int i = 0; i < 5 && i < frames; ++i)
+    {
+        tick();
+    }
+
+    int measured_frames = frames - 5;
+    if (measured_frames <= 0) measured_frames = frames;
+
+    HighResolutionTimerForWin bench_timer;
+    bench_timer.set_start();
+    for (int i = 0; i < measured_frames; ++i)
+    {
+        tick();
+        total_arrange += pre_time_;
+        total_density += density_time_;
+        total_force += force_time_;
+        total_frame += total_time_;
+    }
+    bench_timer.set_end();
+
+    double elapsed_ms = bench_timer.get_millisecond();
+    double avg_frame = elapsed_ms / measured_frames;
+    double fps = 1000.0 / avg_frame;
+
+    std::cout << "\n========== Headless benchmark (" << measured_frames << " frames) ==========\n";
+    std::cout << "Total wall time: " << elapsed_ms << " ms\n";
+    std::cout << "Average frame time: " << avg_frame << " ms\n";
+    std::cout << "FPS: " << fps << "\n";
+    std::cout << "Per-stage averages (CUDA events):\n";
+    std::cout << "  arrange/grid : " << (total_arrange / measured_frames) << " ms\n";
+    std::cout << "  density      : " << (total_density / measured_frames) << " ms\n";
+    std::cout << "  force        : " << (total_force / measured_frames) << " ms\n";
+    std::cout << "  total kernel : " << (total_frame / measured_frames) << " ms\n";
+    std::cout << "==================================================\n" << std::endl;
+}
 
 void HybridSystem::initializeScene(const std::string &file_name, Scene scene)
 {
@@ -579,6 +637,11 @@ void HybridSystem::drawInfo(GLdouble w, GLdouble h)
 
     // output number of particles
     ss << "#particles: " << nump_;
+    renderBitmapString(x, y, 0, GLUT_BITMAP_HELVETICA_12, ss);
+    ss.str(""); y += delta_y;
+
+    // output frame index and total frame time
+    ss << "frame: " << loop << "  total time: " << total_time_ << "ms";
     renderBitmapString(x, y, 0, GLUT_BITMAP_HELVETICA_12, ss);
     ss.str(""); y += delta_y;
 

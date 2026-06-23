@@ -40,10 +40,11 @@ struct Scene
 class HybridSystem
 {
 public:
-    HybridSystem(const float3 &real_world_side, const float3 &sim_origin);
+    HybridSystem(const float3 &real_world_side, const float3 &sim_origin, bool headless = false);
     ~HybridSystem();
 
-    void tick();                            
+    void tick();
+    void runBenchmark(int frames);
     void setPause();
     bool isRunning();
     uint getNumParticles();
@@ -80,6 +81,7 @@ private:
 	Arrangement *arrangement_;
 	float particle_interval = 0.5f;
     HighResolutionTimerForWin frame_timer_;
+    bool headless_mode_ = false;
     bool get_detailed_time_ = false;
     float total_time_ = 0.0f;
     float pre_time_, density_time_, force_time_;

@@ -22,13 +22,14 @@ inline void knComputeCellForceSMS64(const int& isSame, float3 *pres_kn, float3 *
         if (kDevSysPara.kernel_2 < dis_2 || kFloatSmall > dis_2)
             continue;
 
-        float dis = sqrtf(dis_2);
+        float inv_dis = rsqrtf(dis_2);
+        float dis = dis_2 * inv_dis;
         float V = 1 / neighbor_position.w;
         float kernel_r = kDevSysPara.kernel - dis;
 
         // pressure force
         float temp_pres_kn = V * (self_data->ev.w + sdata->getEV(i).w) * kernel_r * kernel_r;
-        *pres_kn -= rel_pos * __fdividef(temp_pres_kn, dis);
+        *pres_kn -= rel_pos * (temp_pres_kn * inv_dis);
 
         // viscosity force
         float3 rel_vel = cal_rePos(self_data->ev, sdata->getEV(i));// sdata->getEV(i) - self_data->ev;
@@ -330,33 +331,31 @@ void knComputeCellForceTRA9(float3 *pres_kn, float3 *vis_kn, ParticleBufferList 
     int end_idx = cell_offset + cell_num;
     for (size_t i = cell_offset; i < end_idx; ++i)
     {
-             register float4 neighbor_pos = buff_list.position_d[i];
-             register float4 neighbor_ev = buff_list.evaluated_velocity[i];
-
-   //     register float4 neighbor_pos = buff_list.position_d[i];
-   //     register float4 neighbor_ev = buff_list.evaluated_velocity[i];
+        float4 neighbor_pos = buff_list.position_d[i];
+        float4 neighbor_ev  = buff_list.evaluated_velocity[i];
 
         float3 rel_pos = cal_rePos(neighbor_pos, self_data->pos);
         float dis_2 = rel_pos.x * rel_pos.x + rel_pos.y * rel_pos.y + rel_pos.z * rel_pos.z;
 
         if (dis_2 < kFloatSmall || dis_2 > kDevSysPara.kernel_2) continue;
 
-        float dis = sqrtf(dis_2);
+        float inv_dis = rsqrtf(dis_2);
+        float dis = dis_2 * inv_dis;
         float V = 1 / (neighbor_pos.w);
         float kernel_r = kDevSysPara.kernel - dis;
 
-
         float temp_pres_kn = V * (self_data->ev.w + neighbor_ev.w) * kernel_r * kernel_r;
-        *pres_kn -= rel_pos * __fdividef(temp_pres_kn, dis);
+        *pres_kn -= rel_pos * (temp_pres_kn * inv_dis);
 
-        float3 rel_vel = cal_rePos(self_data->ev, neighbor_ev);//buff_list.evaluated_velocity[i] - self_data->ev;
+        float3 rel_vel = cal_rePos(self_data->ev, neighbor_ev);
         float temp_vis_kn = V * kernel_r;
         *vis_kn += rel_vel * temp_vis_kn;
 
-        float temp = V * powf_2(kDevSysPara.kernel_2 - dis_2);
+        float h2_r2 = kDevSysPara.kernel_2 - dis_2;
+        float temp = V * h2_r2 * h2_r2;
         self_data->grad_color += rel_pos * temp;
-        self_data->lplc_color += V * (kDevSysPara.kernel_2 - dis_2) *
-            (dis_2 - 3 / 4 * (kDevSysPara.kernel_2 - dis_2));
+        self_data->lplc_color += V * h2_r2 *
+            (dis_2 - 3 / 4 * h2_r2);
     }
 
     // return total_force;
@@ -461,23 +460,24 @@ void knComputeForceTRA(ParticleBufferList buff_list, int *cell_offset, int *cell
     self_data.lplc_color *= kDevSysPara.lplc_poly6 * kDevSysPara.mass;
 
     self_data.lplc_color = __fdividef(self_data.lplc_color, self_data.pos.w);
-    float sur_nor = sqrtf(self_data.grad_color.x * self_data.grad_color.x +
-                          self_data.grad_color.y * self_data.grad_color.y +
-                          self_data.grad_color.z * self_data.grad_color.z);
+    float sur_nor_sq = self_data.grad_color.x * self_data.grad_color.x +
+                       self_data.grad_color.y * self_data.grad_color.y +
+                       self_data.grad_color.z * self_data.grad_color.z;
+    float inv_sur_nor = rsqrtf(sur_nor_sq);
+    float sur_nor = sur_nor_sq * inv_sur_nor;
     //buff_list.surface_normal_vector[self_idx] = sur_nor;
 
     float3 force;
-    //force = self_data.grad_color * kDevSysPara.surface_coe * self_data.lplc_color / sur_nor;
     if (sur_nor > kDevSysPara.surface_normal)
     {
-        force = self_data.grad_color * kDevSysPara.surface_coe * self_data.lplc_color / sur_nor;
+        force = self_data.grad_color * (kDevSysPara.surface_coe * self_data.lplc_color * inv_sur_nor);
     }
     else
     {
         force = make_float3(0.0f, 0.0f, 0.0f);
     }
 
-    total_force *= kDevSysPara.mass;// / buff_list.density[self_idx];
+    total_force *= kDevSysPara.mass;
     buff_list.acceleration[self_idx] = total_force + force;
 }
 
@@ -533,7 +533,6 @@ void kncomputeForceHybrid128n(int *cell_offset_M,ParticleIdxRange range, Particl
 
         register CFData self_data;
         self_data.pos = buff_list.position_d[self_idx];
-     //   self_data.pos = buff_list.position_d[self_idx];
         self_data.ev = buff_list.evaluated_velocity[self_idx]; 
    //     self_data.ev = buff_list.evaluated_velocity[self_idx];
        
@@ -579,12 +578,12 @@ void kncomputeForceHybrid128n(int *cell_offset_M,ParticleIdxRange range, Particl
 				cell_offset_ =
 					kInvalidCellIdx == nid_left ? cell_offset[nid_mid] : cell_offset_M[(nid_left << 6) + (xxx << 4)];
 				cell_nump_ = cell_num[nid_mid];
-				if (kInvalidCellIdx != nid_left) cell_nump_ += cell_offset[nid_mid] - cell_offset_M[(nid_left << 6) + (xxx << 4)];//cell_nump[nid_left];
+				if (kInvalidCellIdx != nid_left) cell_nump_ += cell_offset[nid_mid] - cell_offset_M[(nid_left << 6) + (xxx << 4)];
 				if (xxx == 3){
 					if (kInvalidCellIdx != nid_right) cell_nump_ += cell_num[nid_right];
 				}
 				else{
-					if (kInvalidCellIdx != nid_right) cell_nump_ += cell_offset_M[(nid_right << 6) + ((xxx + 1) << 4)] - cell_offset_M[(nid_right << 6)];//cell_nump[nid_right];
+					if (kInvalidCellIdx != nid_right) cell_nump_ += cell_offset_M[(nid_right << 6) + ((xxx + 1) << 4)] - cell_offset_M[(nid_right << 6)];
 				}
 
                 knComputeCellForceTRA9(&pres_kn, &vis_kn, buff_list, &self_data, cell_offset_, cell_nump_);
@@ -687,16 +686,17 @@ void kncomputeForceHybrid128n(int *cell_offset_M,ParticleIdxRange range, Particl
             self_data.lplc_color *= kDevSysPara.lplc_poly6 * kDevSysPara.mass;
 
             self_data.lplc_color = __fdividef(self_data.lplc_color, self_data.pos.w);
-            float sur_nor = sqrtf(self_data.grad_color.x * self_data.grad_color.x +
-                                  self_data.grad_color.y * self_data.grad_color.y +
-                                  self_data.grad_color.z * self_data.grad_color.z);
+            float sur_nor_sq = self_data.grad_color.x * self_data.grad_color.x +
+                               self_data.grad_color.y * self_data.grad_color.y +
+                               self_data.grad_color.z * self_data.grad_color.z;
+            float inv_sur_nor = rsqrtf(sur_nor_sq);
+            float sur_nor = sur_nor_sq * inv_sur_nor;
             // buff_list.surface_normal_vector[self_idx] = sur_nor;
 
             float3 force;
-            //force = self_data.grad_color * kDevSysPara.surface_coe * self_data.lplc_color / sur_nor;
             if (sur_nor > kDevSysPara.surface_normal)
             {
-                force = self_data.grad_color * kDevSysPara.surface_coe * self_data.lplc_color / sur_nor;
+                force = self_data.grad_color * (kDevSysPara.surface_coe * self_data.lplc_color * inv_sur_nor);
             }
             else
             {

@@ -952,6 +952,7 @@ void Arrangement::arrangeBlockTasksFixedM(int *hash, int *celloff, int *cellnum,
 	CUDA_SAFE_CALL(cudaMemcpyAsync(h_num_cta_pinned_, d_num_cta_, sizeof(int), cudaMemcpyDeviceToHost, 0));
 	CUDA_SAFE_CALL(cudaStreamSynchronize(0));
 	h_num_cta_ = *h_num_cta_pinned_;
+	middle_value_ = *h_middle_value_pinned_;
 
 	judgeTask << <ceil_int(h_num_cta_, num_thread), num_thread >> >(d_task_array, d_num_cta_);
 }
@@ -1240,7 +1241,7 @@ void Arrangement::CountingSort_O_M()
 	int numCN = (numc_ <<6);
 	int num_blockc = ceil_int(numCN + 1, num_thread);
 
-	cudaMemset(d_cell_nump_M, 0x00, sizeof(int)* (numCN+1));
+	CUDA_SAFE_CALL(cudaMemsetAsync(d_cell_nump_M, 0x00, sizeof(int)* (numCN+1), 0));
 
 	//clean_data << <num_blockc, num_thread >> >(d_cell_nump_M, numCN);
 	
@@ -1344,7 +1345,7 @@ void Arrangement::CountingSortCUDA_Two9_M()
 	int num_block = ceil_int(nump_, num_thread);
 	int num_blockc = ceil_int(numCell, num_thread);
 
-	cudaMemset(cell_num_two, 0x00, sizeof(int)* (numCell));
+	CUDA_SAFE_CALL(cudaMemsetAsync(cell_num_two, 0x00, sizeof(int)* (numCell), 0));
 
 	//clean_data << <num_blockc, num_thread >> >(cell_num_two, numCell+1);
 	
@@ -1359,8 +1360,7 @@ void Arrangement::CountingSortCUDA_Two9_M()
 	unsigned int shared_mem_size = (num_thread + 1) * sizeof(int);
 	knFindHybridModeMiddleValue << <num_block, num_thread, shared_mem_size >> >(numc_, d_middle_value_, hashp, nump_);
 	    CUDA_SAFE_CALL(cudaMemcpyAsync(h_middle_value_pinned_, d_middle_value_, sizeof(int), cudaMemcpyDeviceToHost, 0));
-    CUDA_SAFE_CALL(cudaStreamSynchronize(0));
-    middle_value_ = *h_middle_value_pinned_;
+    // Sync is deferred to arrangeBlockTasksFixedM() so both scalar reads can share one stream sync.
 }
 
 int Arrangement::arrangeHybridMode9(){
