@@ -176,10 +176,18 @@ void computeOtherForceHybrid128(ParticleIdxRange range, ParticleBufferList buff_
     knComputeOtherForceHybrid128 << <number_blocks, num_thread >> >(range, buff_list, cell_offset, cell_number, block_task, bt_offset);
 
 }
-void computeDensityHybrid128n(int *cell_offset_M, ParticleIdxRange range, ParticleBufferList buff_list_n, int* cindex, int *cell_offset, int *cell_num, BlockTask *block_task, int num_block){
+void computeDensityHybrid128n(int *cell_offset_M, ParticleIdxRange range, ParticleBufferList buff_list_n, int* cindex, int *cell_offset, int *cell_num, BlockTask *block_task, int num_block, const int *d_num_block, const int *d_middle, int sms_task_bound){
 
     int total_thread = range.end - range.begin;
     int num_thread = 64;
+#if HYBRID_DEVICE_GRID_SIZING
+    // Over-provision the grid; the kernel reads the TRA/SMS split and the SMS task
+    // count from device memory and excess blocks exit immediately.
+    (void)num_block;
+    int number_blocks = ceil_int(total_thread, num_thread) + ceil_int(sms_task_bound, 2);
+    if (number_blocks <= 0) return;
+	kncomputeDensityHybrid128n << <number_blocks, num_thread >> >(cell_offset_M, range, buff_list_n, cindex, cell_offset, cell_num, block_task, d_num_block, d_middle);
+#else
     int bt_offset = 0;
     int number_blocks = ceil_int(num_block, 2);
     if (total_thread > 0){
@@ -187,13 +195,21 @@ void computeDensityHybrid128n(int *cell_offset_M, ParticleIdxRange range, Partic
         number_blocks += bt_offset;
     }
     if (number_blocks <= 0) return;
-//	std::cout << ceil_int(num_block, 2) << "               " << num_block << "         asfasdfasfasdfafsd" << std::endl;
-	kncomputeDensityHybrid128n << <number_blocks, num_thread >> >(cell_offset_M, range, buff_list_n, cindex, cell_offset, cell_num, block_task, bt_offset);
+	kncomputeDensityHybrid128n << <number_blocks, num_thread >> >(cell_offset_M, range, buff_list_n, cindex, cell_offset, cell_num, block_task, d_num_block, d_middle);
+#endif
 }
 
-void computeForceHybrid128n(int *cell_offset_M, ParticleIdxRange range, ParticleBufferList buff_list_n, int* cindex, int *cell_offset, int *cell_num, BlockTask *block_task, int num_block){
+void computeForceHybrid128n(int *cell_offset_M, ParticleIdxRange range, ParticleBufferList buff_list_n, int* cindex, int *cell_offset, int *cell_num, BlockTask *block_task, int num_block, const int *d_num_block, const int *d_middle, int sms_task_bound){
     int total_thread = range.end - range.begin;
     int num_thread = 64;
+#if HYBRID_DEVICE_GRID_SIZING
+    // Over-provision the grid; the kernel reads the TRA/SMS split and the SMS task
+    // count from device memory and excess blocks exit immediately.
+    (void)num_block;
+    int number_blocks = ceil_int(total_thread, num_thread) + ceil_int(sms_task_bound, 2);
+    if (number_blocks <= 0) return;
+	kncomputeForceHybrid128n << <number_blocks, num_thread >> >(cell_offset_M, range, buff_list_n, cindex, cell_offset, cell_num, block_task, d_num_block, d_middle);
+#else
     int bt_offset = 0;
     int number_blocks = ceil_int(num_block, 2);
     if (total_thread > 0){
@@ -201,7 +217,8 @@ void computeForceHybrid128n(int *cell_offset_M, ParticleIdxRange range, Particle
         number_blocks += bt_offset;
     }
     if (number_blocks <= 0) return;
-	kncomputeForceHybrid128n << <number_blocks, num_thread >> >(cell_offset_M,range, buff_list_n, cindex, cell_offset, cell_num, block_task, bt_offset);
+	kncomputeForceHybrid128n << <number_blocks, num_thread >> >(cell_offset_M,range, buff_list_n, cindex, cell_offset, cell_num, block_task, d_num_block, d_middle);
+#endif
 }
 
 void computeOtherForceHybrid128n(ParticleIdxRange range, ParticleBufferList buff_list_n, int* cindex, int *cell_offset, int *cell_num, BlockTask *block_task, int num_block){

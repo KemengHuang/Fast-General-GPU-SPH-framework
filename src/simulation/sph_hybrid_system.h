@@ -34,7 +34,7 @@ struct Scene
     float interval = 0.5f;
     float mass = 0.02f;
     uint recomm_nump = kDefaultNumParticles;
-	float x, y, z;
+	float x = 0.0f, y = 0.0f, z = 0.0f;
 };
 
 class HybridSystem
@@ -78,9 +78,10 @@ private:
 
     SystemParameter sys_para_;
     //std::unique_ptr<Arrangement> arrangement_;
-	Arrangement *arrangement_;
+	Arrangement *arrangement_ = nullptr;
 	float particle_interval = 0.5f;
     HighResolutionTimerForWin frame_timer_;
+    HighResolutionTimerForWin tick_timer_;
     bool headless_mode_ = false;
     bool get_detailed_time_ = false;
     float total_time_ = 0.0f;

@@ -19,10 +19,10 @@ inline void cuda_safe_call_(cudaError err, const char *file_name, const int num_
 {
     if (cudaSuccess != err)
     {
-        exit(0);
         std::cerr << file_name << "[" << num_line << "]: "
             << "CUDA Running API error[" << (int)err << "]: "
             << cudaGetErrorString(err) << std::endl;
+        exit(EXIT_FAILURE);
     }
 }
 
@@ -31,11 +31,11 @@ inline void cuda_kernel_check_(const char *error_msg, const char *file_name, con
     cudaError_t err = cudaDeviceSynchronize();
     if (cudaSuccess != err)
     {
-        exit(0);
         std::cerr << file_name << "[" << num_line << "]: "
             << (error_msg == nullptr ? "NONE" : error_msg)
             << "[" << (int)err << "]: "
             << cudaGetErrorString(err) << std::endl;
+        exit(EXIT_FAILURE);
     }
 }
 

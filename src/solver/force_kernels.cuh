@@ -58,8 +58,8 @@ __global__ //__launch_bounds__(128, kDefulatMinBlocksSMS)
 void knComputeOtherForceHybrid128(ParticleIdxRange range, ParticleBufferList buff_list, int *cell_offset, int *cell_num, BlockTask *block_task, int bt_offset);
 __global__ //__launch_bounds__(128, kDefulatMinBlocksSMS)
 void knComputeOtherForceHybrid128n(ParticleIdxRange range, ParticleBufferList buff_list_n, int *cindex, int *cell_offset, int *cell_num, BlockTask *block_task, int bt_offset);
-__global__ //__launch_bounds__(64, 10)
-void kncomputeForceHybrid128n(int *cell_offset_M,ParticleIdxRange range, ParticleBufferList buff_list, int *cindex, int *cell_offset, int *cell_num, BlockTask *block_task, int bt_offset);
+__global__ __launch_bounds__(64, 10)
+void kncomputeForceHybrid128n(int *cell_offset_M,ParticleIdxRange range, ParticleBufferList buff_list, int *cindex, int *cell_offset, int *cell_num, BlockTask *block_task, const int *d_num_block, const int *d_middle);
 
 }
 

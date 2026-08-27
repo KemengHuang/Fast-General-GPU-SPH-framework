@@ -11,7 +11,7 @@
 	], 
 	"mass" : 0.00027,
 	"interval" : 0.15,
-	"recomm_nump" : 15500000,
+	"recomm_nump" : 4000000,
 	"xx": 1.6,
 	"yy": 1.6,
 	"zz": 1.6

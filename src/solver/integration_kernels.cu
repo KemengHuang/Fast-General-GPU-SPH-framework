@@ -117,16 +117,16 @@ void knIntegrateVelocitySimWave(ParticleBufferList buff_list, unsigned int nump,
         accelerate.z -= alpha * diff + beta * eval_vel.z;
     }
 
-    const float acc_limit = 3000000;
-    const float vel_limit = 36;
+    const float acc_limit = 3000000;    // squared-magnitude limit
+    const float vel_limit = 36;         // squared-magnitude limit
     accelerate = (accelerate / position.w + kDevSysPara.gravity);
     speed = accelerate.x * accelerate.x + accelerate.y * accelerate.y + accelerate.z * accelerate.z;
     if (speed > acc_limit)
-        accelerate *= 1 / sqrtf(acc_limit);
+        accelerate *= sqrtf(acc_limit / speed); // clamp |a| to sqrt(acc_limit)
     t_velocity += accelerate * kDevSysPara.time_step;
     speed = t_velocity.x*t_velocity.x + t_velocity.y*t_velocity.y + t_velocity.z*t_velocity.z;
     if (speed > vel_limit)
-        t_velocity *= 1 / sqrtf(vel_limit);
+        t_velocity *= sqrtf(vel_limit / speed); // clamp |v| to sqrt(vel_limit)
 
     position = addfloat4(position, t_velocity * kDevSysPara.time_step);
 
@@ -160,7 +160,7 @@ void knIntegrateVelocitySimWave(ParticleBufferList buff_list, unsigned int nump,
 
     buff_list.position_d[idx] = position;
     buff_list.velocity[idx] = t_velocity;
-    buff_list.evaluated_velocity[idx] = floathalf4add3(t_velocity, buff_list.evaluated_velocity[idx]);
+    buff_list.evaluated_velocity[idx] = floathalf4add3(t_velocity, eval_vel);
     buff_list.final_position[idx] = float4m3(kDevSysPara.sim_ratio, position) + kDevSysPara.sim_origin;
 }
 __global__
@@ -228,7 +228,7 @@ void knIntegrateVelocitySim(ParticleBufferList buff_list, unsigned int nump)
 
 	buff_list.position_d[idx] = position;
 	buff_list.velocity[idx] = velocity;
-	buff_list.evaluated_velocity[idx] = floathalf4add3(velocity, buff_list.evaluated_velocity[idx]);
+	buff_list.evaluated_velocity[idx] = floathalf4add3(velocity, eval_vel);
 	buff_list.final_position[idx] = float4m3(kDevSysPara.sim_ratio, position) + kDevSysPara.sim_origin;
 }
 
@@ -250,8 +250,6 @@ void knIntegrateVelocityE(ParticleBufferList buff_list, unsigned int nump)
 	float3 accelerate = buff_list.acceleration[idx];
 
 	float diff, speed;
-	float3 norm;
-	float adj;
 	const float alpha = 20000000;
 	const float beta = 200000;
 
@@ -289,17 +287,17 @@ void knIntegrateVelocityE(ParticleBufferList buff_list, unsigned int nump)
 	{
 		accelerate.z -= alpha * diff + beta * t_velocity.z;
 	}
-	const float acc_limit = 3000000;
-	const float vel_limit = 36;
+	const float acc_limit = 3000000;	// squared-magnitude limit
+	const float vel_limit = 36;			// squared-magnitude limit
 	accelerate = (accelerate / t_position.w + kDevSysPara.gravity);
 	speed = accelerate.x * accelerate.x + accelerate.y * accelerate.y + accelerate.z * accelerate.z;
 	if (speed > acc_limit)
-		accelerate *= 1 / sqrtf(acc_limit);
+		accelerate *= sqrtf(acc_limit / speed);	// clamp |a| to sqrt(acc_limit)
 	t_velocity += accelerate * kDevSysPara.time_step;
 
 	speed = t_velocity.x*t_velocity.x + t_velocity.y*t_velocity.y + t_velocity.z*t_velocity.z;
 	if (speed > vel_limit)
-		t_velocity *= 1 / sqrtf(vel_limit);
+		t_velocity *= sqrtf(vel_limit / speed);	// clamp |v| to sqrt(vel_limit)
 	float4 position = addfloat4(t_position, t_velocity * kDevSysPara.time_step);
 
 	if (position.x >= kDevSysPara.bound_max.x){
@@ -329,7 +327,7 @@ void knIntegrateVelocityE(ParticleBufferList buff_list, unsigned int nump)
 
 	buff_list.position_d[idx] = position;
 	buff_list.velocity[idx] = t_velocity;
-	buff_list.evaluated_velocity[idx] = floathalf4add3(t_velocity, buff_list.evaluated_velocity[idx]);
+	buff_list.evaluated_velocity[idx] = floathalf4add3(t_velocity, eval_vel);
 	buff_list.final_position[idx] = float4m3(kDevSysPara.sim_ratio, position) + kDevSysPara.sim_origin;
 }
 __global__

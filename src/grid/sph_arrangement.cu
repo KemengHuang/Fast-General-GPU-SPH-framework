@@ -23,13 +23,13 @@ namespace sph
 
 /****************************GPU_COUNT_SORT**************************/
 
-__global__ void CountingSort_Cell_Sum(int *p_offset, int *hashId, int *cell_numbers, int iSize, float4 *position, float cell_size, ushort3 grid_size)
+__global__ void CountingSort_Cell_Sum(int *p_offset, int *hashId, int *cell_numbers, int iSize, float4 *position, float inv_cell_size, ushort3 grid_size)
 {
     int x_id = __umul24(blockDim.x, blockIdx.x) + threadIdx.x;
 
     if (x_id < iSize)
     {
-        int hid = ParticlePos2CellIdx(position[x_id], grid_size, cell_size);
+        int hid = ParticlePos2CellIdx(position[x_id], grid_size, inv_cell_size);
         hashId[x_id] = hid;
         p_offset[x_id] = atomicAdd(cell_numbers + hid, 1);
     }
@@ -55,12 +55,12 @@ __global__ void CountingSort_Cell_Sum_two(int *p_offset, int *hashId, int *cell_
         p_offset[x_id] = atomicAdd(cell_numbers + selfHash, 1);
     }
 }
-__global__ void CountingSort_Cell_Sum_two9(int *p_offset, int *hashId, int *cell_numbers, int iSize, float4 *position, float cell_size, ushort3 grid_size,int *block_reqs, int numc)
+__global__ void CountingSort_Cell_Sum_two9(int *p_offset, int *hashId, int *cell_numbers, int iSize, float4 *position, float inv_cell_size, ushort3 grid_size,int *block_reqs, int numc)
 {
     int x_id = __umul24(blockDim.x, blockIdx.x) + threadIdx.x;
     if (x_id < iSize)
     {
-        int selfHash = ParticlePos2CellIdx(position[x_id], grid_size, cell_size);
+        int selfHash = ParticlePos2CellIdx(position[x_id], grid_size, inv_cell_size);
         selfHash = block_reqs[selfHash] > 0 ? (selfHash + numc) : selfHash;
         hashId[x_id] = selfHash;
         p_offset[x_id] = atomicAdd(cell_numbers + selfHash, 1);
@@ -261,7 +261,7 @@ void Arrangement::CountingSortCUDA()
     int num_blockc = ceil_int(numc_+1, num_thread);
 
     clean_data << <num_blockc, num_thread >> >(d_cell_nump_, numc_);
-    CountingSort_Cell_Sum << <num_block, num_thread >> >(d_p_offset_, d_hash_, d_cell_nump_, nump_, buff_list_.get_buff_list().position_d, cell_size_, grid_size_);
+    CountingSort_Cell_Sum << <num_block, num_thread >> >(d_p_offset_, d_hash_, d_cell_nump_, nump_, buff_list_.get_buff_list().position_d, inv_cell_size_, grid_size_);
     cudaMemcpy(d_cell_offset_+ 1, d_cell_nump_, sizeof(int) * numc_, cudaMemcpyDeviceToDevice);
     CountingSort_Offest_P(num_blockc, num_thread, d_cell_offset_, numc_+1);
     CountingSort_Result << <num_block, num_thread >> >(d_p_offset_p,d_p_offset_, d_hash_, hashp, d_cell_offset_, nump_, buff_list_.get_buff_list(), buff_temp_.get_buff_list());
@@ -360,7 +360,8 @@ void knFindHybridModeMiddleValue(int numc, int *mid_val, int *hash, unsigned int
 {
     extern __shared__ int shared_hash[];
     unsigned int idx = threadIdx.x + __umul24(blockDim.x, blockIdx.x);
-    if (idx == 0){ *mid_val = -1; }
+    // *mid_val is initialized to -1 via cudaMemsetAsync before this kernel is launched;
+    // initializing it here would race with the transition write below.
     int self_hash;
     if (idx < nump){
         self_hash = hash[idx];
@@ -438,6 +439,7 @@ void Arrangement::CountingSortCUDA_Two()
     hashp = p;
 
 
+    CUDA_SAFE_CALL(cudaMemsetAsync(d_middle_value_, 0xFF, sizeof(int), 0));
     knFindHybridModeMiddleValue << <num_block, num_thread, shared_mem_size >> >(numc_, d_middle_value_, d_hash_, nump_);
     //CUDA_SAFE_CALL(cudaMemset(d_middle_value_, 0xffffffff, sizeof(int)));
     //knFindCellRangeAndHybridModeMiddleValue <<<num_block, num_thread, shared_mem_size >>>(numc_, d_start_index_, d_end_index_, d_middle_value_, d_hash_, nump_);
@@ -464,13 +466,13 @@ void Arrangement::CountingSortCUDA_Two()
 #define HASH2BLOCKREQ(X) (X >> 30)
 
 __global__
-void knCalculateHash(int *hash, int *index, float4 *position, float cell_size, ushort3 grid_size, unsigned int nump)
+void knCalculateHash(int *hash, int *index, float4 *position, float inv_cell_size, ushort3 grid_size, unsigned int nump)
 {
     unsigned int idx = threadIdx.x + __umul24(blockDim.x, blockIdx.x);
 
     if (idx >= nump) return;
 
-    hash[idx] = ParticlePos2CellIdx(position[idx], grid_size, cell_size);
+    hash[idx] = ParticlePos2CellIdx(position[idx], grid_size, inv_cell_size);
     index[idx] = idx;
 }
 
@@ -570,11 +572,11 @@ void knFindCellRange(int *start_idx, int *end_idx, int *hash, unsigned int nump)
 //}
 
 __global__
-void countCellNum(int *hash, float4 *position, float cell_size, ushort3 grid_size, int *cell_num, unsigned int nump)
+void countCellNum(int *hash, float4 *position, float inv_cell_size, ushort3 grid_size, int *cell_num, unsigned int nump)
 {
     unsigned int idx = threadIdx.x + __umul24(blockDim.x, blockIdx.x);
     if (idx >= nump) return;
-    int hav = ParticlePos2CellIdx(position[idx], grid_size, cell_size);
+    int hav = ParticlePos2CellIdx(position[idx], grid_size, inv_cell_size);
     hash[idx] = hav;
     atomicAdd(cell_num + hav, 1);
 }
@@ -582,13 +584,13 @@ void countCellNum(int *hash, float4 *position, float cell_size, ushort3 grid_siz
 
 
 
-//__global__ void countCellNum(int *hashId, int *cell_numbers, int iSize, float3 *position, float cell_size, ushort3 grid_size)
+//__global__ void countCellNum(int *hashId, int *cell_numbers, int iSize, float3 *position, float inv_cell_size, ushort3 grid_size)
 //{
 //    unsigned int x_id = __umul24(blockDim.x, blockIdx.x) + threadIdx.x;
 //
 //    if (x_id < iSize)
 //    {
-//        int hid = ParticlePos2CellIdx(position[x_id], grid_size, cell_size);
+//        int hid = ParticlePos2CellIdx(position[x_id], grid_size, inv_cell_size);
 //        hashId[x_id] = hid;
 //        atomicAdd(cell_numbers + hid, 1);
 //    }
@@ -602,8 +604,8 @@ void countCellNum(int *hash, float4 *position, float cell_size, ushort3 grid_siz
 
 /****************************** Arrangement ******************************/
 
-Arrangement::Arrangement(ParticleBufferObject &buff_list, ParticleBufferObject &buff_temp,unsigned int nump, unsigned int nump_capacity, float cell_size, ushort3 grid_size)
-    : buff_list_(buff_list), buff_temp_(buff_temp),  nump_(nump), nump_capacity_(nump_capacity), cell_size_(cell_size), grid_size_(grid_size)
+Arrangement::Arrangement(ParticleBufferObject &buff_list, ParticleBufferObject &buff_temp,unsigned int nump, unsigned int nump_capacity, float inv_cell_size, ushort3 grid_size)
+    : buff_list_(buff_list), buff_temp_(buff_temp),  nump_(nump), nump_capacity_(nump_capacity), cell_size_(1.0f / inv_cell_size), inv_cell_size_(inv_cell_size), grid_size_(grid_size)
 {
     numc_ = grid_size.x * grid_size.y * grid_size.z;
 
@@ -729,12 +731,12 @@ int Arrangement::arrangeTRAMode()
 
 
 __global__
-void knInsertParticles(int *cell_nump, int* p_offset, float4 *position, float cell_size, ushort3 grid_size, unsigned int nump) {
+void knInsertParticles(int *cell_nump, int* p_offset, float4 *position, float inv_cell_size, ushort3 grid_size, unsigned int nump) {
     unsigned int idx = threadIdx.x + __umul24(blockDim.x, blockIdx.x);
 
     if (idx >= nump) return;
 
-    int cell_id = ParticlePos2CellIdx(position[idx], grid_size, cell_size);
+    int cell_id = ParticlePos2CellIdx(position[idx], grid_size, inv_cell_size);
     p_offset[idx] = atomicAdd(cell_nump + cell_id, 1);
 }
 
@@ -753,17 +755,17 @@ void Arrangement::CSInsertParticles() {
     int num_blockc = ceil_int(numc_, num_thread);
     s_clean_data << <num_blockc, num_thread >> >(d_cell_nump_, numc_);
     //CUDA_SAFE_CALL(cudaMemset(d_cell_nump_, 0, numc_ * sizeof(int)));
-    knInsertParticles << <num_block, num_thread >> >(d_cell_nump_, d_p_offset_, buff_list_.get_buff_list().position_d, cell_size_, grid_size_, nump_);
+    knInsertParticles << <num_block, num_thread >> >(d_cell_nump_, d_p_offset_, buff_list_.get_buff_list().position_d, inv_cell_size_, grid_size_, nump_);
 }
 
 __global__
 void knCountingSortFull(ParticleBufferList old_data, ParticleBufferList new_data,
-int *cell_offset, int *p_offset, float cell_size, ushort3 grid_size, unsigned int nump) {
+int *cell_offset, int *p_offset, float inv_cell_size, ushort3 grid_size, unsigned int nump) {
     unsigned int idx = threadIdx.x + __umul24(blockDim.x, blockIdx.x);
 
     if (idx >= nump) return;
 
-    int cell_id = ParticlePos2CellIdx(old_data.position_d[idx], grid_size, cell_size);
+    int cell_id = ParticlePos2CellIdx(old_data.position_d[idx], grid_size, inv_cell_size);
     int sorted_idx = cell_offset[cell_id] + p_offset[idx];
 
     new_data.position_d[sorted_idx] = old_data.position_d[idx];
@@ -775,7 +777,7 @@ void Arrangement::CSCountingSortFull() {
     int num_thread = 128;
     int num_block = ceil_int(nump_, num_thread);
 
-    knCountingSortFull << <num_block, num_thread >> >(buff_list_.get_buff_list(), buff_temp_.get_buff_list(), d_cell_offset_, d_p_offset_, cell_size_, grid_size_, nump_);
+    knCountingSortFull << <num_block, num_thread >> >(buff_list_.get_buff_list(), buff_temp_.get_buff_list(), d_cell_offset_, d_p_offset_, inv_cell_size_, grid_size_, nump_);
 }
 
 void Arrangement::sortParticles() {
@@ -949,12 +951,20 @@ void Arrangement::arrangeBlockTasksFixedM(int *hash, int *celloff, int *cellnum,
 
 	knArrangeTasksFixedM << <num_block, num_thread >> >(hash, celloff, cellnum, d_task_array, d_num_cta_, d_cta_reqs, d_task_array_offset, grid_size_, cta_size, numc_);
 
+#if HYBRID_DEVICE_GRID_SIZING
+	// No host readback: judgeTask and the physics kernels size themselves on device.
+	// judgeTask's grid is over-provisioned with a safe upper bound on the task count
+	// (each task covers 32 particles and each cell adds at most one partial task).
+	int task_bound = ceil_int(nump_, 32) + numc_;
+	judgeTask << <ceil_int(task_bound, num_thread), num_thread >> >(d_task_array, d_num_cta_);
+#else
 	CUDA_SAFE_CALL(cudaMemcpyAsync(h_num_cta_pinned_, d_num_cta_, sizeof(int), cudaMemcpyDeviceToHost, 0));
 	CUDA_SAFE_CALL(cudaStreamSynchronize(0));
 	h_num_cta_ = *h_num_cta_pinned_;
 	middle_value_ = *h_middle_value_pinned_;
 
 	judgeTask << <ceil_int(h_num_cta_, num_thread), num_thread >> >(d_task_array, d_num_cta_);
+#endif
 }
 
 void Arrangement::arrangeBlockTasksFixed(BlockTask* d_task_array, int* d_cta_reqs, int* d_task_array_offset, int cta_size) {
@@ -988,7 +998,7 @@ void Arrangement::assignTasksFixedCTA() {
     int num_blockc = ceil_int(numc_ + 1, num_thread);
 
     clean_data << <num_blockc, num_thread >> >(d_cell_nump_, numc_);
-    CountingSort_Cell_Sum << <num_block, num_thread >> >(d_p_offset_, d_hash_, d_cell_nump_, nump_, buff_list_.get_buff_list().position_d, cell_size_, grid_size_);
+    CountingSort_Cell_Sum << <num_block, num_thread >> >(d_p_offset_, d_hash_, d_cell_nump_, nump_, buff_list_.get_buff_list().position_d, inv_cell_size_, grid_size_);
     cudaMemcpy(d_cell_offset_ + 1, d_cell_nump_, sizeof(int) * numc_, cudaMemcpyDeviceToDevice);
     CountingSort_Offest_P(num_blockc, num_thread, d_cell_offset_, numc_ + 1);
     CountingSort_Result << <num_block, num_thread >> >(d_p_offset_p, d_p_offset_, d_hash_, hashp, d_cell_offset_, nump_, buff_list_.get_buff_list(), buff_temp_.get_buff_list());
@@ -1069,8 +1079,8 @@ void Arrangement::countNum()
     int num_thread = 256;
     int num_block = ceil_int(nump_, num_thread);
     //CUDA_SAFE_CALL(cudaMemset(cell_num_, 0x00000000, numc_ * sizeof(int)));
-    countCellNum << <num_block, num_thread >> >(d_hash_, buff_list_.get_buff_list().position_d, cell_size_, grid_size_, cell_num_, nump_);
-    //countCellNum << <num_block, num_thread >> >(d_hash_, cell_num_, nump_, buff_list_.get_buff_list().position, cell_size_, grid_size_);
+    countCellNum << <num_block, num_thread >> >(d_hash_, buff_list_.get_buff_list().position_d, inv_cell_size_, grid_size_, cell_num_, nump_);
+    //countCellNum << <num_block, num_thread >> >(d_hash_, cell_num_, nump_, buff_list_.get_buff_list().position, inv_cell_size_, grid_size_);
 }
 
 
@@ -1086,7 +1096,7 @@ void Arrangement::CountingSort_O()
 
     clean_data << <num_blockc, num_thread >> >(d_cell_nump_, numc_);
 
-    CountingSort_Cell_Sum << <num_block, num_thread >> >(d_p_offset_, d_hash_, d_cell_nump_, nump_, buff_list_.get_buff_list().position_d, cell_size_, grid_size_);
+    CountingSort_Cell_Sum << <num_block, num_thread >> >(d_p_offset_, d_hash_, d_cell_nump_, nump_, buff_list_.get_buff_list().position_d, inv_cell_size_, grid_size_);
 
     cudaMemcpy(d_cell_offset_ + 1, d_cell_nump_, sizeof(int) * numc_, cudaMemcpyDeviceToDevice);
     CountingSort_Offest_P(num_blockc, num_thread, d_cell_offset_, numc_ + 1);
@@ -1212,13 +1222,13 @@ __global__ void CountingSort_Result_M(int *p_offset_p, int *p_offset, int *hash,
 		//        new_data.phase[p_id] = old_data.phase[id];
 	}
 }
-__global__ void CountingSort_Cell_SumM(int *p_offset, int *hashId, int *cell_numbers, int iSize, float4 *position, float cell_size, ushort3 grid_size)
+__global__ void CountingSort_Cell_SumM(int *p_offset, int *hashId, int *cell_numbers, int iSize, float4 *position, float inv_cell_size, ushort3 grid_size)
 {
 	int x_id = __umul24(blockDim.x, blockIdx.x) + threadIdx.x;
 
 	if (x_id < iSize)
 	{
-		int hid = ParticlePos2CellIdxM(position[x_id], grid_size, cell_size);
+		int hid = ParticlePos2CellIdxM(position[x_id], grid_size, inv_cell_size);
 		hashId[x_id] = hid;// >> 6;
 		p_offset[x_id] = atomicAdd(cell_numbers + hid, 1);
 	}
@@ -1245,7 +1255,7 @@ void Arrangement::CountingSort_O_M()
 
 	//clean_data << <num_blockc, num_thread >> >(d_cell_nump_M, numCN);
 	
-	CountingSort_Cell_SumM << <num_block, num_thread >> >(d_p_offset_, d_hash_, d_cell_nump_M, nump_, buff_list_.get_buff_list().position_d, cell_size_, grid_size_);
+	CountingSort_Cell_SumM << <num_block, num_thread >> >(d_p_offset_, d_hash_, d_cell_nump_M, nump_, buff_list_.get_buff_list().position_d, inv_cell_size_, grid_size_);
 
 	//cudaMemcpy(d_cell_offset_M + 1, d_cell_nump_M, sizeof(int)* numCN, cudaMemcpyDeviceToDevice);
 	//CountingSort_Offest_P(num_blockc, num_thread, d_cell_offset_M, numCN + 1);
@@ -1332,6 +1342,7 @@ void Arrangement::CountingSortCUDA_Two9()
                                   cell_num_two, cell_num_two, numCell);
     CountingSort_Result_two9 << <num_block, num_thread >> >(d_p_offset_p, d_hash_, hashp, cell_num_two, d_index_, nump_);
     unsigned int shared_mem_size = (num_thread + 1) * sizeof(int);
+    CUDA_SAFE_CALL(cudaMemsetAsync(d_middle_value_, 0xFF, sizeof(int), 0));
     knFindHybridModeMiddleValue << <num_block, num_thread, shared_mem_size >> >(numc_, d_middle_value_, hashp, nump_);
         CUDA_SAFE_CALL(cudaMemcpyAsync(h_middle_value_pinned_, d_middle_value_, sizeof(int), cudaMemcpyDeviceToHost, 0));
     CUDA_SAFE_CALL(cudaStreamSynchronize(0));
@@ -1358,9 +1369,12 @@ void Arrangement::CountingSortCUDA_Two9_M()
 
 	CountingSort_Result_two9 << <num_block, num_thread >> >(d_p_offset_p, d_hash_p, hashp, cell_num_two, d_index_, nump_);
 	unsigned int shared_mem_size = (num_thread + 1) * sizeof(int);
+	CUDA_SAFE_CALL(cudaMemsetAsync(d_middle_value_, 0xFF, sizeof(int), 0));
 	knFindHybridModeMiddleValue << <num_block, num_thread, shared_mem_size >> >(numc_, d_middle_value_, hashp, nump_);
+#if !HYBRID_DEVICE_GRID_SIZING
 	    CUDA_SAFE_CALL(cudaMemcpyAsync(h_middle_value_pinned_, d_middle_value_, sizeof(int), cudaMemcpyDeviceToHost, 0));
     // Sync is deferred to arrangeBlockTasksFixedM() so both scalar reads can share one stream sync.
+#endif
 }
 
 int Arrangement::arrangeHybridMode9(){
@@ -1371,7 +1385,7 @@ int Arrangement::arrangeHybridMode9(){
     arrangeBlockTasksFixed(d_block_task_, d_block_reqs_, d_task_array_offset_32_, 32);
     return (middle_value_ > nump_ || middle_value_ < 0) ? nump_ : middle_value_;
 }
-int Arrangement::arrangeHybridMode9M(){
+void Arrangement::arrangeHybridMode9M(){
 	CountingSort_O_M();
 	gpu_model::calculateBlockRequirementHybridMode(cell_type, d_cell_nump_, d_block_reqs_, p_gpu_model_, d_cell_offset_, d_cell_nump_, grid_size_, 32);
 	CountingSortCUDA_Two9_M();
@@ -1379,7 +1393,8 @@ int Arrangement::arrangeHybridMode9M(){
 	cub::DeviceScan::ExclusiveSum(d_cub_scan_temp_, cub_scan_temp_bytes_,
                                   d_block_reqs_, d_task_array_offset_32_, numc_);
 	arrangeBlockTasksFixedM(d_hash_, d_cell_offset_, d_cell_nump_, d_block_task_, d_block_reqs_, d_task_array_offset_32_, 32);
-	return (middle_value_ > nump_ || middle_value_ < 0) ? nump_ : middle_value_;
+	// The TRA/SMS split point stays on device (d_middle_value_); the physics
+	// kernels clamp and consume it there.
 }
 int Arrangement::arrangeHybridMode(){
     //calculateHash();

@@ -17,7 +17,7 @@ inline void knComputeCellForceSMS64(const int& isSame, float3 *pres_kn, float3 *
     //#pragma unroll 16
 	int kk = (1 - isSame)*(threadIdx.x>>5);
     //float vis_kn;
-    for (size_t i = (kk <<5); i < (kk <<5) + read_num; ++i)
+    for (int i = (kk <<5); i < (kk <<5) + read_num; ++i)
     {
 
         float4 neighbor_position = sdata->getPosition(i);
@@ -57,7 +57,7 @@ inline void knComputeCellForceSMS(float3 *pres_kn, float3 *vis_kn, SimForSharedD
     //#pragma unroll 16
 
     //float vis_kn;
-    for (size_t i = 0; i < read_num; ++i)
+    for (int i = 0; i < read_num; ++i)
     {
         float4 neighbor_position = sdata->getPosition(i);
         float3 rel_pos = cal_rePos(neighbor_position, self_data->pos);
@@ -88,6 +88,8 @@ inline void knComputeCellForceSMS(float3 *pres_kn, float3 *vis_kn, SimForSharedD
             (dis_2 - 0.75f * (kDevSysPara.kernel_2 - dis_2));
     }
 }
+// WARNING: dead/broken kernel kept for reference only — cell_id and the shared-memory
+// staging calls are commented out, so launching it is undefined behavior.
 __global__ //__launch_bounds__(kDefaultNumThreadSMS, kDefulatMinBlocksSMS)
 void knComputeForceSMS(ParticleBufferList buff_list, int *cell_offset, int *cell_num, BlockTask *block_task)
 {
@@ -154,6 +156,8 @@ void knComputeForceSMS(ParticleBufferList buff_list, int *cell_offset, int *cell
         buff_list.acceleration[self_idx] = total_force + force;
     }
 }
+// WARNING: dead/broken kernel kept for reference only — cell_id and the shared-memory
+// staging calls are commented out, so launching it is undefined behavior.
 __global__ //__launch_bounds__(kDefaultNumThreadSMS, kDefulatMinBlocksSMS)
 void knComputeForceSMS64(ParticleBufferList buff_list, int *cell_offset, int *cell_num, BlockTask *block_task)
 {
@@ -251,7 +255,7 @@ void knComputeCellForceReg64(float4 *shared_pos, float4 *shared_ev, int warp_bas
 {
     // Ensure the loop bound is uniform across the warp.
     read_num = __shfl_sync(0xFFFFFFFF, read_num, 0);
-    for (size_t i = warp_base; i < warp_base + read_num; ++i)
+    for (int i = warp_base; i < warp_base + read_num; ++i)
     {
         float4 neighbor_position = shared_pos[i];
         float4 neighbor_ev = shared_ev[i];
@@ -331,7 +335,7 @@ void knComputeCellForceTRA(float3 *pres_kn, float3 *vis_kn, ParticleBufferList &
     int end_idx = start_idx + cell_num[cell_id];
     if (0xffffffff == start_idx) return;// total_force;
 
-    for (size_t i = start_idx; i < end_idx; ++i)
+    for (int i = start_idx; i < end_idx; ++i)
     {
              register float4 neighbor_pos = __ldg(&buff_list.position_d[i]);
              register float4 neighbor_ev = __ldg(&buff_list.evaluated_velocity[i]);
@@ -379,7 +383,7 @@ void knComputeCellForceTRA9(float3 *pres_kn, float3 *vis_kn, ParticleBufferList 
 
     if (0 == cell_num) return;
     int end_idx = cell_offset + cell_num;
-    for (size_t i = cell_offset; i < end_idx; ++i)
+    for (int i = cell_offset; i < end_idx; ++i)
     {
         float4 neighbor_pos = __ldg(&buff_list.position_d[i]);
         float4 neighbor_ev  = __ldg(&buff_list.evaluated_velocity[i]);
@@ -448,7 +452,7 @@ void knComputeForceTRA(ParticleBufferList buff_list, int *cell_offset, int *cell
     self_data.lplc_color = 0.0f;
 
 
-    ushort3 cell_pos = ParticlePos2CellPos(self_data.pos, kDevSysPara.cell_size);
+    ushort3 cell_pos = ParticlePos2CellPos(self_data.pos, kDevSysPara.inv_cell_size);
 
     //float3 total_force = make_float3(0.0f, 0.0f, 0.0f);
     register float3 pres_kn = make_float3(0.0f, 0.0f, 0.0f);
@@ -573,12 +577,18 @@ void knComputeOtherForceHybrid128n(ParticleIdxRange range, ParticleBufferList bu
 {
 
 }
-__global__ //__launch_bounds__(64, 10)
-void kncomputeForceHybrid128n(int *cell_offset_M,ParticleIdxRange range, ParticleBufferList buff_list, int *cindex, int *cell_offset, int *cell_num, BlockTask *block_task, int bt_offset)
+__global__ __launch_bounds__(64, 10)
+void kncomputeForceHybrid128n(int *cell_offset_M,ParticleIdxRange range, ParticleBufferList buff_list, int *cindex, int *cell_offset, int *cell_num, BlockTask *block_task, const int *d_num_block, const int *d_middle)
 {
+    // Device-side TRA/SMS split: the host over-provisions the grid and excess
+    // blocks exit immediately, so the frame needs no host readback/synchronization.
+    int middle = __ldg(d_middle);
+    if (middle < 0 || middle > range.end) middle = range.end;
+    const int bt_offset = (middle - range.begin + 63) >> 6;  // ceil((middle - begin) / 64)
+
     if (blockIdx.x < bt_offset){
         int self_idx = threadIdx.x + __umul24(blockIdx.x, blockDim.x) + range.begin;
-        if (self_idx >= range.end) return;
+        if (self_idx >= middle) return;
         self_idx = __ldg(&cindex[self_idx]);
 
         register CFData self_data;
@@ -591,7 +601,7 @@ void kncomputeForceHybrid128n(int *cell_offset_M,ParticleIdxRange range, Particl
         self_data.lplc_color = 0.0f;
 
 
-		ushort3 cell_posc = ParticlePos2CellPosM(self_data.pos, kDevSysPara.cell_size);
+		ushort3 cell_posc = ParticlePos2CellPosM(self_data.pos, kDevSysPara.inv_cell_size);
 
 		ushort3 cell_pos = calCI(cell_posc);
 		int xxx = (cell_posc.x) & 0x03;
@@ -683,6 +693,7 @@ void kncomputeForceHybrid128n(int *cell_offset_M,ParticleIdxRange range, Particl
     else{
 
         int t = blockIdx.x - bt_offset;
+        if ((t << 1) >= __ldg(d_num_block)) return;  // over-provisioned SMS block (block-uniform exit)
 		int n = (t<<1) + (threadIdx.x>>5);
 		BlockTask bt = block_task[n];
         int isSame = 0;// bt.isSame;
@@ -695,9 +706,11 @@ void kncomputeForceHybrid128n(int *cell_offset_M,ParticleIdxRange range, Particl
 		char c = bt.zzi;
 		char d = bt.zzz;*/
 
-        register int self_idx = cell_offset[cell_id] + bt.p_offset + threadIdx.x % 32; //__mul24(bt.sub_idx, blockDim.x) + threadIdx.x;
+        register int cell_off = __ldg(&cell_offset[cell_id]);
+        register int cell_np = __ldg(&cell_num[cell_id]);
+        register int self_idx = cell_off + bt.p_offset + threadIdx.x % 32; //__mul24(bt.sub_idx, blockDim.x) + threadIdx.x;
 
-        register int temp_cell_end = cell_offset[cell_id] + cell_num[cell_id];
+        register int temp_cell_end = cell_off + cell_np;
 
         register float3 pres_kn = make_float3(0.0f, 0.0f, 0.0f);
         register float3 vis_kn = make_float3(0.0f, 0.0f, 0.0f);
@@ -713,27 +726,10 @@ void kncomputeForceHybrid128n(int *cell_offset_M,ParticleIdxRange range, Particl
         }
 
 #if FORCE_SMS_USE_REGISTER_PATH
-        // Register-load + warp-local shared exchange for different-cell tasks,
-        // shared-memory path kept for same-cell tasks (dominant case).
-        if (isSame == 1)
+        // Register-load + warp-local shared exchange for different-cell tasks.
+        // (The isSame==1 shared-memory variant was removed: isSame is hard-wired to 0.)
         {
-            __shared__ SimForSharedData128 sdata;
-            sdata.initialize(bt.zzi, bt.zzz, bt.xxi, bt.xxx, cell_offset_M, isSame, cell_offset, cell_num, cellpos, kDevSysPara.grid_size);
-            while (true)
-            {
-                __syncthreads();
-                int r = sdata.read32Data(cell_offset_M, isSame, buff_list);
-                __syncthreads();
-                if (0 == r) break;
-                if (active)
-                {
-                    knComputeCellForceSMS64(isSame, &pres_kn, &vis_kn, &sdata, &self_data, r);
-                }
-            }
-        }
-        else
-        {
-            bool warp_has_work = (bt.p_offset < cell_num[cell_id]);
+            bool warp_has_work = (bt.p_offset < cell_np);
             __shared__ SimForRegData128 sdata;
             __shared__ float4 shared_pos[64];
             __shared__ float4 shared_ev[64];

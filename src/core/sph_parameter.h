@@ -19,6 +19,7 @@ struct SystemParameter
 {
     float3      world_size;
     float       cell_size;
+    float       inv_cell_size;  // 1.0f / cell_size, precomputed to avoid per-thread division
     ushort3        grid_size;
 
     float       kernel;

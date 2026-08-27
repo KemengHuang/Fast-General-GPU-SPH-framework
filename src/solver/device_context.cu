@@ -16,7 +16,6 @@ cudaEvent_t sms_force_event;
 void transSysParaToDevice(const SystemParameter *host_para)
 {
     CUDA_SAFE_CALL(cudaMemcpyToSymbol(kDevSysPara, host_para, sizeof(SystemParameter)));
-    printf("testing self_density %f\n", kDevSysPara.mass);
 }
 
 void initializeKernel()

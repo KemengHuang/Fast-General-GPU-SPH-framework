@@ -20,6 +20,9 @@
 class PNGTexture
 {
 public:
+    PNGTexture() = default;
+    PNGTexture(const PNGTexture&) = delete;
+    PNGTexture& operator=(const PNGTexture&) = delete;
     ~PNGTexture(){
         if (data_) free(data_);
     }
@@ -65,22 +68,23 @@ private:
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 
-        GLenum fmt;
-        int size;
+        GLenum fmt = GL_RGBA;
+        int size = 4;
         switch (format_) {
         case IMG_RGB:	fmt = GL_RGB; size = 3;			break;
         case IMG_RGBA:	fmt = GL_RGBA; size = 4;		break;
         case IMG_LUM:	fmt = GL_LUMINANCE; size = 1;	break;
+        default: break;
         }
 
         glTexImage2D(GL_TEXTURE_2D, 0, fmt, x_resolution_, y_resolution_, 0, fmt, GL_UNSIGNED_BYTE, data_);
     }
 
     GLuint texture_ = 0;
-    unsigned int x_resolution_;
-    unsigned int y_resolution_;
-    unsigned int size_;
-    unsigned int format_;
+    unsigned int x_resolution_ = 0;
+    unsigned int y_resolution_ = 0;
+    unsigned int size_ = 0;
+    unsigned int format_ = IMG_RGBA;
     unsigned int *data_ = nullptr;
 };
 

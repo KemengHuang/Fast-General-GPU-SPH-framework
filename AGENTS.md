@@ -84,6 +84,15 @@ These paths are also hard-coded in:
   `buff_list.evaluated_velocity[idx]`). Do not reintroduce texture references.
 - **Default scene is heavy.** `assets/scene_default.json` generates ~3.94M particles and may
   take a while to initialize. For quick iteration, use a smaller scene.
+- **Grid-cell lookup uses precomputed reciprocals.** `ParticlePos2CellPos*` take
+  `inv_cell_size` (multiplication), not `cell_size` (division); `SystemParameter::inv_cell_size`
+  and `Arrangement::inv_cell_size_` are computed once at init.
+- **Broken legacy kernels are kept but marked.** `knComputeDensitySMS/SMS64`,
+  `knComputeForceSMS/SMS64` have uninitialized `cell_id` (assignments commented out) — launching
+  them is undefined behavior. They are not on the live path; do not call them without restoring
+  the missing pieces.
+- **Screenshot capture runs before `glutSwapBuffers`** (back buffer is undefined after a swap)
+  and creates the `screenshot/` directory on demand.
 - **`CMakeLists.txt` recursively collects all source/header files under `src/` and
   `third_party/lodepng/`.** `prefix_sum.cu` is header-guarded and is pulled in by
   `scan.cu`; adding it via the recursive glob only makes it visible in the IDE tree.
@@ -119,6 +128,25 @@ These paths are also hard-coded in:
 - **Per-frame scalar D2H copies are now asynchronous.** `middle_value_` and `h_num_cta_` are
   copied into pinned host buffers with `cudaMemcpyAsync` + `cudaStreamSynchronize`, avoiding the
   implicit global device sync of synchronous `cudaMemcpy`.
+- **Hybrid kernel launch sizing.** The density/force hybrid kernels read the TRA/SMS split
+  point (`d_middle_value_`) and the SMS task count (`d_num_cta_`) directly from device memory
+  and size their own branch split; `HYBRID_DEVICE_GRID_SIZING` in `src/core/sph_utils.cuh`
+  selects the host-side strategy. `0` (default) keeps one pinned async readback + stream sync
+  per frame and launches exact grids; `1` over-provisions the grids and skips the sync.
+  Measured on RTX 4090 / 3.94M particles, `0` is ~2% faster (over-provisioned block scheduling
+  costs more than the sync).
+- **`__launch_bounds__(64, 10)` is enabled on the hybrid kernels** and validated spill-free
+  (density: 40 regs, force: 57 regs — check with `cuobjdump -res-usage` after changes).
+- **Particle buffers are sized by exact particle count.** `initializeScene` counts the fluid
+  blocks before allocating; `recomm_nump` in the scene JSON is only a fallback. (Previously
+  `recomm_nump: 15500000` over-allocated ~1.9 GB of device/pinned memory for the default
+  3.94M-particle scene.)
+- **Velocity/acceleration limiters are proper clamps.** `knIntegrateVelocity*` clamp
+  `|v|`/`|a|` to `sqrt(limit)` (`limit` is the squared-magnitude bound). Before, they scaled
+  by a constant `1/sqrt(limit)`, crushing any over-limit velocity to a fixed small value.
+- **Benchmark mode no longer syncs per frame.** `runBenchmark` collects per-stage CUDA-event
+  timings from 5 warm-up frames and measures wall-clock FPS over the remaining frames with a
+  single final `cudaDeviceSynchronize`.
 - **Detailed timing is off by default.** Set `get_detailed_time_ = true` in
   `src/simulation/sph_hybrid_system.h` only when you need per-stage timing; it still inserts a
   per-frame `cudaEventSynchronize`.

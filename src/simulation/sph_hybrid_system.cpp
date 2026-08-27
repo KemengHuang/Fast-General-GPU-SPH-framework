@@ -114,6 +114,7 @@ inline void defaultInitializeSPHSysPara(SystemParameter &sys_para, Scene *scene)
 
 	sys_para.world_size = make_float3(scene->x, scene->y, scene->z);
     sys_para.cell_size = sys_para.kernel;
+    sys_para.inv_cell_size = 1.0f / sys_para.cell_size;
     sys_para.grid_size = make_ushort3((int)ceil(sys_para.world_size.x / sys_para.cell_size),
                                    (int)ceil(sys_para.world_size.y / sys_para.cell_size),
                                    (int)ceil(sys_para.world_size.z / sys_para.cell_size));
@@ -139,6 +140,9 @@ inline void defaultInitializeSPHSysPara(SystemParameter &sys_para, Scene *scene)
     sys_para.grad_poly6 = -945 / (32 * M_PI * pow(sys_para.kernel, 9));
     sys_para.lplc_poly6 = 945 / (8 * M_PI * pow(sys_para.kernel, 9));
     sys_para.self_density = sys_para.mass * sys_para.poly6_value * pow(sys_para.kernel, 6);
+    // NOTE: the "3 / 4" below is integer division (evaluates to 0), so self_lplc_color
+    // is always 0. The field is currently not consumed anywhere, so the formula is left
+    // as-is to preserve behavior; fix to 3.0f / 4.0f if it ever gets used.
     sys_para.self_lplc_color = sys_para.lplc_poly6 * sys_para.mass * sys_para.kernel_2 * (0 - 3 / 4 * sys_para.kernel_2);
 
     sys_para.bound_interval = sys_para.kernel;
@@ -230,6 +234,8 @@ HybridSystem::~HybridSystem()
     waitForGraphicsCopy();
     unregisterGraphicsResources();
     destroyPersistentCudaResources();
+    delete arrangement_;
+    arrangement_ = nullptr;
     resetBuffer(0);
     releaseKernel();
 }
@@ -239,48 +245,55 @@ void HybridSystem::tick()
 {
     if (!is_running_) return;
 	tt++;
-    HighResolutionTimerForWin timer;
-    timer.set_start();
+    tick_timer_.set_start();
     static int step = 0;
     if (get_detailed_time_ && !tick_events_created_)
     {
         createPersistentCudaResources();
     }
     int *d_index = arrangement_->getDevCellIndex();
-    int *offset_data = arrangement_->getDevOffsetData();
     int *cell_offset = arrangement_->getDevCellOffset();
 
 	int *cell_offsetM = arrangement_->getDevCellOffsetM();
 
     int *cell_nump = arrangement_->getDevCellNumP();
     if (get_detailed_time_) CUDA_SAFE_CALL(cudaEventRecord(tick_events_[0]));
-    int middle = nump_;
-    //arrangement_->sortParticles();
 
-    middle = arrangement_->arrangeHybridMode9M();
+    arrangement_->arrangeHybridMode9M();
 //    arrangement_->CountingSortCUDA();
 //    arrangement_->assignTasksFixedCTA();
 
-
-    ParticleIdxRange tra_range(0, middle);      // [0, middle)
-
-//      std::cout << "middle value: ******************************************" << middle << std::endl;
+#if HYBRID_DEVICE_GRID_SIZING
+    // TRA particles occupy [0, middle) of the compaction index. The physics kernels
+    // read the actual split point from device memory, so the upper bound suffices
+    // here and no host readback is needed.
+    ParticleIdxRange tra_range(0, nump_);
+    // Safe upper bound on the SMS task count: one task per 32 particles plus at
+    // most one partial task per cell.
+    int sms_task_bound = (nump_ + 31) / 32 + arrangement_->getNumC();
+#else
+    // Host-synced sizing: middle_value_ is valid after the arrange sync.
+    int middle_host = arrangement_->getMiddleValue();
+    if (middle_host < 0 || middle_host > (int)nump_) middle_host = nump_;
+    ParticleIdxRange tra_range(0, middle_host);
+    int sms_task_bound = 0;  // unused on the host-synced path
+#endif
     if (get_detailed_time_) CUDA_SAFE_CALL(cudaEventRecord(tick_events_[1]));
 
-	computeDensityHybrid128n(cell_offsetM, tra_range, device_buff_.get_buff_list(), d_index, cell_offset, cell_nump, arrangement_->getBlockTasks(), arrangement_->getNumBlockSMSMode());
+	computeDensityHybrid128n(cell_offsetM, tra_range, device_buff_.get_buff_list(), d_index, cell_offset, cell_nump, arrangement_->getBlockTasks(), arrangement_->getNumBlockSMSMode(), arrangement_->getDevNumCTA(), arrangement_->getDevMiddleValue(), sms_task_bound);
 //    computeDensitySMS64(device_buff_.get_buff_list(), cell_offset, cell_nump, arrangement_->getBlockTasks(), arrangement_->getNumBlockSMSMode());
 //    computeDensityTRA(device_buff_.get_buff_list(), ParticleIdxRange(0, nump_), cell_offset, cell_nump);
     //   std::cout << step << std::endl;
     if (get_detailed_time_) CUDA_SAFE_CALL(cudaEventRecord(tick_events_[2]));
 
-	computeForceHybrid128n(cell_offsetM, tra_range, device_buff_.get_buff_list(), d_index, cell_offset, cell_nump, arrangement_->getBlockTasks(), arrangement_->getNumBlockSMSMode());
+	computeForceHybrid128n(cell_offsetM, tra_range, device_buff_.get_buff_list(), d_index, cell_offset, cell_nump, arrangement_->getBlockTasks(), arrangement_->getNumBlockSMSMode(), arrangement_->getDevNumCTA(), arrangement_->getDevMiddleValue(), sms_task_bound);
 //    computeForceSMS64(device_buff_.get_buff_list(), cell_offset, cell_nump, arrangement_->getBlockTasks(), arrangement_->getNumBlockSMSMode());
 //    computeForceTRA(device_buff_.get_buff_list(), ParticleIdxRange(0, nump_), cell_offset, cell_nump);
     if (get_detailed_time_) CUDA_SAFE_CALL(cudaEventRecord(tick_events_[3]));
 
     advance(device_buff_.get_buff_list(), nump_);
 	//advanceWave(device_buff_.get_buff_list(), nump_,time);
-	time += 0.003;
+	time += sys_para_.time_step;
     if (get_detailed_time_) CUDA_SAFE_CALL(cudaEventRecord(tick_events_[4]));
 
     // Record the point where all simulation kernels for this frame finish.
@@ -299,8 +312,8 @@ void HybridSystem::tick()
         CUDA_SAFE_CALL(cudaEventRecord(copy_done_event_, copy_stream_));
     }
 
-    timer.set_end();
-    total_time_ = static_cast<float>(timer.get_millisecond());
+    tick_timer_.set_end();
+    total_time_ = static_cast<float>(tick_timer_.get_millisecond());
 
     if (get_detailed_time_)
     {
@@ -333,45 +346,50 @@ void HybridSystem::runBenchmark(int frames)
         createPersistentCudaResources();
     }
 
+    // Warm-up with detailed per-frame timing. The event synchronize in tick()
+    // serializes CPU and GPU, so it is only used here to collect per-stage averages.
+    const int warmup_frames = frames < 5 ? frames : 5;
     double total_arrange = 0.0;
     double total_density = 0.0;
     double total_force = 0.0;
-    double total_frame = 0.0;
-
-    // Warm-up: run a few frames so the first-allocation / cache effects don't dominate.
-    for (int i = 0; i < 5 && i < frames; ++i)
-    {
-        tick();
-    }
-
-    int measured_frames = frames - 5;
-    if (measured_frames <= 0) measured_frames = frames;
-
-    HighResolutionTimerForWin bench_timer;
-    bench_timer.set_start();
-    for (int i = 0; i < measured_frames; ++i)
+    double total_kernel = 0.0;
+    for (int i = 0; i < warmup_frames; ++i)
     {
         tick();
         total_arrange += pre_time_;
         total_density += density_time_;
         total_force += force_time_;
-        total_frame += total_time_;
+        total_kernel += total_time_;
     }
+
+    // Measured loop: detailed timing off, so no per-frame CPU-GPU synchronization
+    // distorts the wall-clock throughput. The pipeline is drained once at the end.
+    const int measured_frames = frames - warmup_frames;
+    get_detailed_time_ = false;
+    HighResolutionTimerForWin bench_timer;
+    bench_timer.set_start();
+    for (int i = 0; i < measured_frames; ++i)
+    {
+        tick();
+    }
+    if (measured_frames > 0) CUDA_SAFE_CALL(cudaDeviceSynchronize());
     bench_timer.set_end();
+    get_detailed_time_ = true;
 
     double elapsed_ms = bench_timer.get_millisecond();
-    double avg_frame = elapsed_ms / measured_frames;
+    double avg_frame = measured_frames > 0 ? elapsed_ms / measured_frames
+                                           : total_kernel / warmup_frames;
     double fps = 1000.0 / avg_frame;
 
-    std::cout << "\n========== Headless benchmark (" << measured_frames << " frames) ==========\n";
+    std::cout << "\n========== Headless benchmark (" << measured_frames << " measured + " << warmup_frames << " warm-up frames) ==========\n";
     std::cout << "Total wall time: " << elapsed_ms << " ms\n";
     std::cout << "Average frame time: " << avg_frame << " ms\n";
     std::cout << "FPS: " << fps << "\n";
-    std::cout << "Per-stage averages (CUDA events):\n";
-    std::cout << "  arrange/grid : " << (total_arrange / measured_frames) << " ms\n";
-    std::cout << "  density      : " << (total_density / measured_frames) << " ms\n";
-    std::cout << "  force        : " << (total_force / measured_frames) << " ms\n";
-    std::cout << "  total kernel : " << (total_frame / measured_frames) << " ms\n";
+    std::cout << "Per-stage averages (CUDA events, warm-up frames):\n";
+    std::cout << "  arrange/grid : " << (total_arrange / warmup_frames) << " ms\n";
+    std::cout << "  density      : " << (total_density / warmup_frames) << " ms\n";
+    std::cout << "  force        : " << (total_force / warmup_frames) << " ms\n";
+    std::cout << "  total kernel : " << (total_kernel / warmup_frames) << " ms\n";
     std::cout << "==================================================\n" << std::endl;
 }
 
@@ -381,8 +399,18 @@ void HybridSystem::initializeScene(const std::string &file_name, Scene scene)
     sys_para_.mass = scene.mass;
     transSysParaToDevice(&sys_para_);
 
-    resetBuffer(scene.recomm_nump);
     particle_interval = scene.interval;
+    // Count the particles exactly before allocating, so the buffers are not
+    // sized by the (potentially much larger) recomm_nump hint.
+    uint exact_count = 0;
+    for (const auto &range : scene.fluid_blocks)
+    {
+        for (float x = range.first.x; x < range.second.x; x += sys_para_.kernel * particle_interval)
+            for (float y = range.first.y; y < range.second.y; y += sys_para_.kernel * particle_interval)
+                for (float z = range.first.z; z < range.second.z; z += sys_para_.kernel * particle_interval)
+                    ++exact_count;
+    }
+    resetBuffer(exact_count > 0 ? exact_count : scene.recomm_nump);
     int t = 0;
     for (const auto &range : scene.fluid_blocks)
     {
@@ -403,9 +431,9 @@ void HybridSystem::initializeScene(const std::string &file_name, Scene scene)
 
     host_buff_.transfer(device_buff_, 0, nump_, cudaMemcpyHostToDevice);
 
-    //arrangement_.reset(new Arrangement(device_buff_, device_buff_temp_, nump_, sys_para_.cell_size, sys_para_.grid_size));
-    arrangement_ = //new Arrangement(device_buff_, device_buff_temp_, nump_, buff_capacity_, sys_para_.cell_size, sys_para_.grid_size);
-        new Arrangement(device_buff_, device_buff_temp_,  nump_, buff_capacity_, sys_para_.cell_size, sys_para_.grid_size);
+    //arrangement_.reset(new Arrangement(device_buff_, device_buff_temp_, nump_, sys_para_.inv_cell_size, sys_para_.grid_size));
+    arrangement_ = //new Arrangement(device_buff_, device_buff_temp_, nump_, buff_capacity_, sys_para_.inv_cell_size, sys_para_.grid_size);
+        new Arrangement(device_buff_, device_buff_temp_,  nump_, buff_capacity_, sys_para_.inv_cell_size, sys_para_.grid_size);
 }
 
 
@@ -484,8 +512,8 @@ void HybridSystem::initializeScene2(const std::string &file_name)
     std::cout << "Number of particles: " << nump_ << std::endl;
 
     host_buff_.transfer(device_buff_, 0, nump_, cudaMemcpyHostToDevice);
-    //arrangement_.reset(new Arrangement(device_buff_, device_buff_temp_, nump_, sys_para_.cell_size, sys_para_.grid_size));
-    arrangement_ = new Arrangement(device_buff_, device_buff_temp_, nump_, buff_capacity_, sys_para_.cell_size, sys_para_.grid_size);
+    //arrangement_.reset(new Arrangement(device_buff_, device_buff_temp_, nump_, sys_para_.inv_cell_size, sys_para_.grid_size));
+    arrangement_ = new Arrangement(device_buff_, device_buff_temp_, nump_, buff_capacity_, sys_para_.inv_cell_size, sys_para_.grid_size);
 }
 
 void HybridSystem::setPause()
@@ -626,9 +654,8 @@ void HybridSystem::drawInfo(GLdouble w, GLdouble h)
     if (acc_time > 100.0f) {
         time = 1000 * frame / acc_time; frame = 0; acc_time = 0.0f;
     }
-    float xixi = float(1000.0f / total_time_);
 
-    ss << "FPS: " << xixi;//time;
+    ss << "FPS: " << time;  // smoothed wall-clock FPS
 
 
     frame_timer_.set_start();
@@ -796,9 +823,10 @@ void HybridSystem::unregisterGraphicsResources()
 
 void HybridSystem::createPersistentCudaResources()
 {
-    CUDA_SAFE_CALL(cudaStreamCreate(&copy_stream_));
-    CUDA_SAFE_CALL(cudaEventCreate(&compute_done_event_));
-    CUDA_SAFE_CALL(cudaEventCreate(&copy_done_event_));
+    // Guarded so repeated calls (e.g. lazy tick-event creation in tick()) do not leak.
+    if (!copy_stream_) CUDA_SAFE_CALL(cudaStreamCreate(&copy_stream_));
+    if (!compute_done_event_) CUDA_SAFE_CALL(cudaEventCreate(&compute_done_event_));
+    if (!copy_done_event_) CUDA_SAFE_CALL(cudaEventCreate(&copy_done_event_));
 
     if (get_detailed_time_ && !tick_events_created_)
     {

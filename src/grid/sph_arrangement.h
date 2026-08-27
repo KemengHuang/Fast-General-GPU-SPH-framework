@@ -21,10 +21,10 @@ class Arrangement
 public:
     Arrangement(ParticleBufferObject &buff_list,
                 ParticleBufferObject &buff_temp,
-               
-                unsigned int nump, 
+
+                unsigned int nump,
 				unsigned int nump_capacity,
-                float cell_size, 
+                float inv_cell_size,
                 ushort3 grid_size);
 
     ~Arrangement();
@@ -54,6 +54,13 @@ public:
 
     int* getDevCellNumP() { return d_cell_nump_; }
 
+    // Device scalars consumed by the hybrid physics kernels (device-side grid sizing).
+    const int* getDevNumCTA() { return d_num_cta_; }
+    const int* getDevMiddleValue() { return d_middle_value_; }
+
+    // Host-side copies (only valid on the host-synced path, HYBRID_DEVICE_GRID_SIZING=0).
+    int getMiddleValue() { return middle_value_; }
+
     unsigned int getNumC() { return numc_; }
 
 
@@ -66,7 +73,7 @@ public:
 
 	void CountingSort_O_M();
 	void CountingSortCUDA_Two9_M();
-	int arrangeHybridMode9M();
+	void arrangeHybridMode9M();
 private:
     void calculateHash();
     void calculateHashWithBlockReq();
@@ -98,11 +105,12 @@ private:
 	unsigned int nump_capacity_;
     unsigned int numc_;             // #cells
     float cell_size_;
+    float inv_cell_size_;           // 1.0f / cell_size_, precomputed to avoid per-thread division
     ushort3 grid_size_;
     int middle_value_ = 0;
     int* h_middle_value_pinned_ = nullptr; // [1] pinned host buffer for async D2H of middle_value_
 
-    int  h_num_cta_;
+    int  h_num_cta_ = 0;
     int* h_num_cta_pinned_ = nullptr;      // [1] pinned host buffer for async D2H of d_num_cta_
 
     int* d_num_cta_;

@@ -124,7 +124,7 @@ public:
     explicit ParticleBufferObject();
     ParticleBufferObject(unsigned int cap, BufferType type);
     ParticleBufferObject(const ParticleBufferObject&) = delete;
-    ParticleBufferObject& operator=(const ParticleBufferList&) = delete;
+    ParticleBufferObject& operator=(const ParticleBufferObject&) = delete;
     ~ParticleBufferObject();
 
     void allocate(unsigned int nump, BufferType type);

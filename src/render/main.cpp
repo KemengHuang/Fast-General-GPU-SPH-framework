@@ -121,13 +121,17 @@ void init_sph_system()
 
 void init()
 {
-    glewInit();
+    if (glewInit() != GLEW_OK)
+    {
+        fprintf(stderr, "glewInit failed.\n");
+        exit(EXIT_FAILURE);
+    }
 
     glViewport(0, 0, window_width, window_height);
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
 
-    gluPerspective(45.0, (float)window_width / window_height, 10.0f, 500.0);
+    gluPerspective(45.0, (float)window_width / window_height, 0.1, 500.0);
 
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
@@ -215,14 +219,7 @@ void display_func()
 
     draw_scene();
 
-    glutSwapBuffers();
-
-    sph_timer->update();
-    memset(window_title, 0, 50);
-    sprintf(window_title, "Hybrid GPU Parallel SPH. FPS: %f", sph_timer->get_fps());
-    glutSetWindowTitle(window_title);
-
-
+    // Capture before glutSwapBuffers: the back buffer contents are undefined after a swap.
 	if (screenshot)
 	{
 		static unsigned int step = 0;
@@ -240,26 +237,13 @@ void display_func()
 
 		++step;
 	}
-    //if (screenshot)
-    //{
-    //    //static unsigned int step = 0;
 
-    //    /*std::stringstream ss;
-    //    ss << "screenshot/step_";
-    //    ss.fill('0');
-    //    ss.width(5);
-    //    ss << sph_system->loop;
-    //    std::string file_path = ss.str();*/
+    glutSwapBuffers();
 
-    //    char bmp_name[30] = "screenshot/step_";
-    //    char number[10];
-    //    //        itoa(sph_system->loop, number, 10);
-
-    //    strcat(bmp_name, number);
-    //    SaveScreenShot(window_width, window_height, bmp_name);
-
-    //    //++step;
-    //}
+    sph_timer->update();
+    memset(window_title, 0, 50);
+    sprintf(window_title, "Hybrid GPU Parallel SPH. FPS: %f", sph_timer->get_fps());
+    glutSetWindowTitle(window_title);
 }
 
 void idle_func()
@@ -276,7 +260,7 @@ void reshape_func(GLint width, GLint height)
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
 
-    gluPerspective(45.0, (float)width / height, 0.001, 500.0);
+    gluPerspective(45.0, (float)width / height, 0.1, 500.0);
 
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();

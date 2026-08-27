@@ -60,6 +60,10 @@ void SaveScreenShot(int width, int height, const std::string &file_name)
     memset(screen_data, 0, data_len);
     glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, screen_data);
 
+    // Ensure the output directory exists (fails harmlessly if it already does).
+    std::string dir = file_name.substr(0, file_name.find_last_of("/\\"));
+    if (!dir.empty()) CreateDirectoryA(dir.c_str(), NULL);
+
     WriteBitmapFile(width, height, file_name + ".bmp", (unsigned char*)screen_data);
 
     free(screen_data);

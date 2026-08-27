@@ -16,7 +16,7 @@ inline void knComputeCellDensitySMS64(const int& isSame, SimDenSharedData128 *sd
 {
     //   register float total_cell_density = 0;
     int kk = (1-isSame)*(threadIdx.x>>5);
-    for (size_t i = (kk <<5); i < (kk<<5) + read_num; ++i)
+    for (int i = (kk <<5); i < (kk<<5) + read_num; ++i)
     {
         float4 neighbor_position = sdata->getPos(i);
         float dis_2 = distance_square(self_data->pos, neighbor_position);
@@ -32,7 +32,7 @@ inline void knComputeCellDensitySMS(SimDenSharedData *sdata, CDAPData *self_data
 {
     register float total_cell_density = 0;
     //  int kk = threadIdx.x / 32;
-    for (size_t i = 0; i < read_num; ++i)
+    for (int i = 0; i < read_num; ++i)
     {
         float4 neighbor_position = sdata->getPos(i);
         float dis_2 = distance_square(self_data->pos, neighbor_position);
@@ -43,6 +43,8 @@ inline void knComputeCellDensitySMS(SimDenSharedData *sdata, CDAPData *self_data
 
     //   return total_cell_density;
 }
+// WARNING: dead/broken kernel kept for reference only — cell_id and the shared-memory
+// staging calls are commented out, so launching it is undefined behavior.
 __global__ //__launch_bounds__(kDefaultNumThreadSMS, kDefulatMinBlocksSMS)
 void knComputeDensitySMS(ParticleBufferList buff_list, int *cell_offset, int *cell_num, BlockTask *block_task)
 {
@@ -83,6 +85,8 @@ void knComputeDensitySMS(ParticleBufferList buff_list, int *cell_offset, int *ce
         buff_list.pressure[self_idx] = (powf_7(__fdividef(data.pos.w, kDevSysPara.rest_density)) - 1) * kDevSysPara.gas_constant;
     }
 }
+// WARNING: dead/broken kernel kept for reference only — cell_id and the shared-memory
+// staging calls are commented out, so launching it is undefined behavior.
 __global__ //__launch_bounds__(kDefaultNumThreadSMS, kDefulatMinBlocksSMS)
 void knComputeDensitySMS64(ParticleBufferList buff_list, int *cell_offset, int *cell_num, BlockTask *block_task)
 {
@@ -140,7 +144,7 @@ void knComputeCellDensityTRA(ParticleBufferList &buff_list, CDAPData *self_data,
 
     if (0xffffffff == start_idx) return;
 
-    for (size_t i = start_idx; i < end_idx; ++i)
+    for (int i = start_idx; i < end_idx; ++i)
     {
         float4 neighbor_pos = __ldg(&buff_list.position_d[i]);
         //      float4 neighbor_pos = buff_list.position_d[i];
@@ -161,7 +165,7 @@ void knComputeCellDensityTRA9(ParticleBufferList &buff_list, CDAPData *self_data
 {
     if (0 == cell_num) return;
     int end_idx = cell_offset + cell_num;
-    for (size_t i = cell_offset; i < end_idx; ++i)
+    for (int i = cell_offset; i < end_idx; ++i)
     {
         float4 neighbor_pos = __ldg(&buff_list.position_d[i]);
 
@@ -189,7 +193,7 @@ float knComputeCellMixDensityTRA(ParticleBufferList &buff_list, CDAPData *self_d
 
     if (0xffffffff == start_idx) return 0.0f;
 
-    for (size_t i = start_idx; i < end_idx; ++i)
+    for (int i = start_idx; i < end_idx; ++i)
     {
         float4 neighbor_pos = buff_list.position_d[i];
 
@@ -217,7 +221,7 @@ void knComputeDensityTRA(ParticleBufferList buff_list, int *cell_offset, int *ce
     self_data.pos.w = 0;
 
 
-    ushort3 cell_pos = ParticlePos2CellPos(self_data.pos, kDevSysPara.cell_size);
+    ushort3 cell_pos = ParticlePos2CellPos(self_data.pos, kDevSysPara.inv_cell_size);
 
     register ushort3 grid_size = kDevSysPara.grid_size;
     register int cell_offset_;
@@ -293,19 +297,25 @@ void knComputeCellDensityReg64(float4 *shared_pos, int warp_base, CDAPData *self
 }
 #endif
 
-__global__ //__launch_bounds__(64, 10)
-void kncomputeDensityHybrid128n(int *cell_offset_M, ParticleIdxRange range, ParticleBufferList buff_list, int *cindex, int *cell_offset, int *cell_num, BlockTask *block_task, int bt_offset)
+__global__ __launch_bounds__(64, 10)
+void kncomputeDensityHybrid128n(int *cell_offset_M, ParticleIdxRange range, ParticleBufferList buff_list, int *cindex, int *cell_offset, int *cell_num, BlockTask *block_task, const int *d_num_block, const int *d_middle)
 {
+    // Device-side TRA/SMS split: the host over-provisions the grid and excess
+    // blocks exit immediately, so the frame needs no host readback/synchronization.
+    int middle = __ldg(d_middle);
+    if (middle < 0 || middle > range.end) middle = range.end;
+    const int bt_offset = (middle - range.begin + 63) >> 6;  // ceil((middle - begin) / 64)
+
     if (blockIdx.x < bt_offset){
         int self_idx = threadIdx.x + __umul24(blockIdx.x, blockDim.x) + range.begin;
-        if (self_idx >= range.end) return;
+        if (self_idx >= middle) return;
         self_idx = __ldg(&cindex[self_idx]);
 
         register CDAPData self_data;
         self_data.pos = __ldg(&buff_list.position_d[self_idx]);
   //      self_data.pos =buff_list.position_d[self_idx];
         self_data.pos.w = 0;
-        ushort3 cell_posc = ParticlePos2CellPosM(self_data.pos, kDevSysPara.cell_size);
+        ushort3 cell_posc = ParticlePos2CellPosM(self_data.pos, kDevSysPara.inv_cell_size);
 
 		ushort3 cell_pos = calCI(cell_posc);
 		int xxx = (cell_posc.x) & 0x03;
@@ -386,6 +396,7 @@ void kncomputeDensityHybrid128n(int *cell_offset_M, ParticleIdxRange range, Part
     else{
 
         int t = blockIdx.x - bt_offset;
+        if ((t << 1) >= __ldg(d_num_block)) return;  // over-provisioned SMS block (block-uniform exit)
 		int n = (t << 1) + (threadIdx.x >> 5);
         BlockTask bt = block_task[n];
         int isSame = 0;// bt.isSame;
@@ -393,9 +404,11 @@ void kncomputeDensityHybrid128n(int *cell_offset_M, ParticleIdxRange range, Part
         int cell_id = bt.cellid;
 		ushort3 cellpos = CellIdx2CellPos(cell_id, kDevSysPara.grid_size);
 
-        register int self_idx = cell_offset[cell_id] + bt.p_offset + threadIdx.x % 32;
+        register int cell_off = __ldg(&cell_offset[cell_id]);
+        register int cell_np = __ldg(&cell_num[cell_id]);
+        register int self_idx = cell_off + bt.p_offset + threadIdx.x % 32;
 
-        register int temp_cell_end = cell_offset[cell_id] + cell_num[cell_id];
+        register int temp_cell_end = cell_off + cell_np;
 
         register CDAPData data;
 
@@ -407,30 +420,13 @@ void kncomputeDensityHybrid128n(int *cell_offset_M, ParticleIdxRange range, Part
         }
 
 #if DENSITY_SMS_USE_REGISTER_PATH
-        // Register-load + warp-local shared exchange for different-cell tasks,
-        // shared-memory path kept for same-cell tasks (dominant case).
-        if (isSame == 1)
-        {
-            __shared__ SimDenSharedData128 sdata;
-			sdata.initialize(bt.zzi, bt.zzz, bt.xxi, bt.xxx, cell_offset_M, isSame, cell_offset, cell_num, cellpos, kDevSysPara.grid_size);
-            while (true)
-            {
-				__syncthreads();
-				int r = sdata.read32Data(cell_offset_M, isSame, buff_list);
-				__syncthreads();
-                if (0 == r) break;  // neighbor cells read complete
-                if (active)
-                {
-					knComputeCellDensitySMS64(isSame, &sdata, &data, r);
-                }
-            }
-        }
-        else
+        // Register-load + warp-local shared exchange for different-cell tasks.
+        // (The isSame==1 shared-memory variant was removed: isSame is hard-wired to 0.)
         {
             // A warp whose p_offset is past the cell has no self-particles.
             // All threads still participate in initialize() because it uses
             // __syncthreads(), but the empty warp can skip the iteration loop.
-            bool warp_has_work = (bt.p_offset < cell_num[cell_id]);
+            bool warp_has_work = (bt.p_offset < cell_np);
 
             __shared__ SimDenRegData128 sdata;
 			sdata.initialize(bt.zzi, bt.zzz, bt.xxi, bt.xxx, cell_offset_M, isSame, cell_offset, cell_num, cellpos, kDevSysPara.grid_size);
@@ -475,12 +471,7 @@ void kncomputeDensityHybrid128n(int *cell_offset_M, ParticleIdxRange range, Part
             buff_list.evaluated_velocity[self_idx].w = (powf_7(__fdividef(data.pos.w, kDevSysPara.rest_density)) - 1) * kDevSysPara.gas_constant;
 
 			float denv = (5000 - data.pos.w) / 6000;
-			if (isSame == 1){
-				buff_list.color[self_idx] = COLORA(0.f, 1.0f*denv, 1.0*denv, 1.0);
-			}
-			else{
-				buff_list.color[self_idx] = COLORA(1.0f*denv, 1.0f*denv, 0.f, 1.0);
-			}
+			buff_list.color[self_idx] = COLORA(1.0f*denv, 1.0f*denv, 0.f, 1.0);
         }
     }
 }

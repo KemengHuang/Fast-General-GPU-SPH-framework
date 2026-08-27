@@ -105,7 +105,7 @@ void deallocBlockSums()
 }
 void deallocBlockSumsInt()
 {
-    if (g_scanBlockSums != 0x0) {
+    if (g_scanBlockSumsInt != 0x0) {
         for (unsigned int i = 0; i < g_numLevelsAllocated; i++)
             CUDA_SAFE_CALL(cudaFree(g_scanBlockSumsInt[i]));
         free((void**)g_scanBlockSumsInt);
