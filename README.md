@@ -1,4 +1,4 @@
-# Fast-SPH-framework
+# Fast-General-GPU-SPH-framework
 
 This framework is a fast, general implementation of a GPU SPH method utilizing a uniform grid.
 
@@ -9,7 +9,7 @@ This project is the source code of
 and
 ["A General Novel Parallel Framework for SPH-centric Algorithms"](https://dl.acm.org/doi/10.1145/3321360).
 
-It offers fast optimization strategies based on a uniform grid. Compared to a well-optimized GPU SPH method using the uniform grid, the proposed approach achieves a speed improvement of up to 3.5x. It therefore serves as an excellent benchmark for further research on GPU SPH and for meaningful comparisons.
+It offers fast optimization strategies based on a uniform grid. It also serves as an excellent benchmark for further research on GPU SPH and for meaningful comparisons.
 
 Source code contributors: [Kemeng Huang](https://kemenghuang.github.io), Jiming Ruan.
 
@@ -19,53 +19,74 @@ Source code contributors: [Kemeng Huang](https://kemenghuang.github.io), Jiming 
 
 ### Requirements
 
-- Windows 10/11
-- Visual Studio 2022 Community (or higher)
-- CUDA Toolkit 12.x
 - CMake >= 3.18
-- vcpkg with the following packages installed:
+- CUDA Toolkit 12.x
+- A C++17 toolchain (MSVC 2022, GCC, or Clang)
+- GLEW, FreeGLUT and jsoncpp — e.g. via [vcpkg](https://vcpkg.io) (pick the triplet matching
+  your platform):
   ```bash
-  vcpkg install glew freeglut jsoncpp --triplet x64-windows
+  vcpkg install glew freeglut jsoncpp --triplet x64-windows   # or x64-linux, ...
   ```
+
+**Platform note:** the code currently has a few Windows-only pieces (`windows.h`-based timers,
+`CreateDirectoryA` in the screenshot helper, backslash-style GL includes), so out-of-the-box
+builds target Windows. Porting to Linux/macOS only requires small shims in those spots.
 
 ### Configure
 
-Open a terminal in the repository root and run:
+Standard single-config generators (Ninja, Makefiles):
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+```
+
+Visual Studio (multi-config):
 
 ```bash
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 ```
 
-Make sure CMake can find vcpkg, e.g. by setting `CMAKE_TOOLCHAIN_FILE`:
+If the dependencies are not on the default search path, point CMake at vcpkg:
 
 ```bash
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64 ^
-  -DCMAKE_TOOLCHAIN_FILE=C:/path/to/vcpkg/scripts/buildsystems/vcpkg.cmake
+cmake -S . -B build ... -DCMAKE_TOOLCHAIN_FILE=<vcpkg-root>/scripts/buildsystems/vcpkg.cmake
 ```
 
 ### Build
 
-Open `build/Hybrid_Fluid_Simulation.sln` in Visual Studio and build the `Release` target,
-or build from the command line:
-
 ```bash
-cmake --build build --config Release
+cmake --build build --config Release   # --config is only needed for multi-config generators
 ```
 
-The executable will be produced at `build/Release/gsph.exe`.
+Or open the generated solution/project in your IDE and build the `Release` target. The
+executable is `gsph` (`gsph.exe` on Windows) under `build/` or `build/Release/`, and the
+runtime assets (`assets/`, `shaders/`) are copied next to it automatically.
 
 ### Run
 
-CMake copies the required runtime assets (`assets/`) and shaders (`shaders/`) to the output
-directory automatically. Launch the simulation with:
+Launch the simulation from the build output directory (so the bundled assets are found):
 
 ```bash
-build/Release/gsph.exe
+build/Release/gsph.exe   # Windows / Visual Studio
+# or
+./build/gsph             # single-config generators
 ```
 
 The default scene (`assets/scene_default.json`) generates ~3.94 million particles. For faster
 iteration during development, create a smaller scene file and change `kDefaultSceneFileName` in
-`src/simulation/sph_hybrid_system.cpp`, or add a command-line argument (not implemented yet).
+`src/simulation/sph_hybrid_system.cpp`.
+
+### Headless benchmark
+
+Run a fixed number of frames without opening a window (useful for profiling and CI-style
+performance checks):
+
+```bash
+gsph --benchmark 200
+```
+
+This prints wall-clock FPS plus per-stage timings (grid arrange / density / force) collected
+from CUDA events. `--headless N` is an alias.
 
 ### Controls
 
@@ -74,6 +95,8 @@ iteration during development, create a smaller scene file and change `kDefaultSc
 - `a`/`d` – move left / right
 - `q`/`e` – move down / up
 - `o`/`u` – increase / decrease particle point size
+- Arrow keys – move the light source
+- `t` – advance one simulation step while paused (debug)
 - `/` – toggle screenshot capture to `screenshot/`
 
 ## Project Layout
@@ -92,9 +115,21 @@ iteration during development, create a smaller scene file and change `kDefaultSc
 │   ├── simulation/      high-level simulation, marching cubes, PCISPH helpers
 │   └── solver/          CUDA SPH kernels split by physics, plus dispatch
 ├── third_party/     third-party code (lodepng)
+├── agent_docs/      code analysis, optimization reports, known issues (dev notes)
+├── data/            placeholder for runtime output
 ├── CMakeLists.txt
 └── README.md
 ```
+
+## Performance
+
+Reference numbers for the default scene (~3.94M particles), measured with
+`gsph --benchmark 200` on an RTX 4090 / CUDA 12.4:
+
+- **~35 FPS** (28.6 ms/frame): ~1.2 ms grid arrange, ~9.5 ms density, ~20 ms force
+
+See `agent_docs/optimization_report.md` for the measured optimization history, including
+evaluated-and-rejected experiments (device-side grid sizing, neighbor-batch prefetching).
 
 ## BibTex
 
