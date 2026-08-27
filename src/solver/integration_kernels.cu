@@ -119,7 +119,7 @@ void knIntegrateVelocitySimWave(ParticleBufferList buff_list, unsigned int nump,
 
     const float acc_limit = 3000000;    // squared-magnitude limit
     const float vel_limit = 36;         // squared-magnitude limit
-    accelerate = (accelerate / position.w + kDevSysPara.gravity);
+    accelerate = (accelerate * position.w + kDevSysPara.gravity);  // position.w holds 1/density
     speed = accelerate.x * accelerate.x + accelerate.y * accelerate.y + accelerate.z * accelerate.z;
     if (speed > acc_limit)
         accelerate *= sqrtf(acc_limit / speed); // clamp |a| to sqrt(acc_limit)
@@ -155,7 +155,7 @@ void knIntegrateVelocitySimWave(ParticleBufferList buff_list, unsigned int nump,
         position.z = kDevSysPara.bound_min.z + kernel;
     }
 
-    float denv = (4000 - position.w) / 6000;
+    float denv = (4000.0f - 1.0f / position.w) / 6000;  // position.w holds 1/density
     buff_list.color[idx] = COLORA(0.8f * denv, 0.7f * denv + 0.1, 0.8, 1.0);
 
     buff_list.position_d[idx] = position;
@@ -177,7 +177,7 @@ void knIntegrateVelocitySim(ParticleBufferList buff_list, unsigned int nump)
 	//       register float4 eval_vel = buff_list.evaluated_velocity[idx];
 
 	float3 t_velocity = buff_list.velocity[idx];
-	float3 acc_temp = buff_list.acceleration[idx] / t_position.w + kDevSysPara.gravity;
+	float3 acc_temp = buff_list.acceleration[idx] * t_position.w + kDevSysPara.gravity;  // t_position.w holds 1/density
 	float diff, speed;
 
 
@@ -289,7 +289,7 @@ void knIntegrateVelocityE(ParticleBufferList buff_list, unsigned int nump)
 	}
 	const float acc_limit = 3000000;	// squared-magnitude limit
 	const float vel_limit = 36;			// squared-magnitude limit
-	accelerate = (accelerate / t_position.w + kDevSysPara.gravity);
+	accelerate = (accelerate * t_position.w + kDevSysPara.gravity);  // t_position.w holds 1/density
 	speed = accelerate.x * accelerate.x + accelerate.y * accelerate.y + accelerate.z * accelerate.z;
 	if (speed > acc_limit)
 		accelerate *= sqrtf(acc_limit / speed);	// clamp |a| to sqrt(acc_limit)

@@ -32,7 +32,7 @@ inline void knComputeCellForceSMS64(const int& isSame, float3 *pres_kn, float3 *
 
         float inv_dis = rsqrtf(dis_2);
         float dis = dis_2 * inv_dis;
-        float V = 1 / neighbor_position.w;
+        float V = neighbor_position.w;  // position_d.w stores 1/density
         float kernel_r = kDevSysPara.kernel - dis;
 
         // pressure force
@@ -69,7 +69,7 @@ inline void knComputeCellForceSMS(float3 *pres_kn, float3 *vis_kn, SimForSharedD
             continue;
 
         float dis = sqrtf(dis_2);
-        float V = 1 / neighbor_position.w;
+        float V = neighbor_position.w;  // position_d.w stores 1/density
         float kernel_r = kDevSysPara.kernel - dis;
 
         // pressure force
@@ -135,7 +135,7 @@ void knComputeForceSMS(ParticleBufferList buff_list, int *cell_offset, int *cell
         self_data.grad_color *= kDevSysPara.grad_poly6 * kDevSysPara.mass;
         self_data.lplc_color *= kDevSysPara.lplc_poly6 * kDevSysPara.mass;
 
-        self_data.lplc_color = __fdividef(self_data.lplc_color, buff_list.position_d[self_idx].w);
+        self_data.lplc_color = self_data.lplc_color * buff_list.position_d[self_idx].w;  // position_d.w stores 1/density
         float sur_nor = sqrtf(self_data.grad_color.x * self_data.grad_color.x +
                               self_data.grad_color.y * self_data.grad_color.y +
                               self_data.grad_color.z * self_data.grad_color.z);
@@ -207,7 +207,7 @@ void knComputeForceSMS64(ParticleBufferList buff_list, int *cell_offset, int *ce
         self_data.grad_color *= kDevSysPara.grad_poly6 * kDevSysPara.mass;
         self_data.lplc_color *= kDevSysPara.lplc_poly6 * kDevSysPara.mass;
 
-        self_data.lplc_color = __fdividef(self_data.lplc_color, buff_list.position_d[self_idx].w);
+        self_data.lplc_color = self_data.lplc_color * buff_list.position_d[self_idx].w;  // position_d.w stores 1/density
         float sur_nor = sqrtf(self_data.grad_color.x * self_data.grad_color.x +
                               self_data.grad_color.y * self_data.grad_color.y +
                               self_data.grad_color.z * self_data.grad_color.z);
@@ -268,7 +268,7 @@ void knComputeCellForceReg64(float4 *shared_pos, float4 *shared_ev, int warp_bas
 
         float inv_dis = rsqrtf(dis_2);
         float dis = dis_2 * inv_dis;
-        float V = 1 / neighbor_position.w;
+        float V = neighbor_position.w;  // position_d.w stores 1/density
         float kernel_r = kDevSysPara.kernel - dis;
 
         // pressure force
@@ -349,7 +349,7 @@ void knComputeCellForceTRA(float3 *pres_kn, float3 *vis_kn, ParticleBufferList &
         if (dis_2 < kFloatSmall || dis_2 > kDevSysPara.kernel_2) continue;
 
         float dis = sqrtf(dis_2);
-        float V = 1 / (neighbor_pos.w);
+        float V = (neighbor_pos.w);  // position_d.w stores 1/density
         float kernel_r = kDevSysPara.kernel - dis;
 
         // pressure force
@@ -395,7 +395,7 @@ void knComputeCellForceTRA9(float3 *pres_kn, float3 *vis_kn, ParticleBufferList 
 
         float inv_dis = rsqrtf(dis_2);
         float dis = dis_2 * inv_dis;
-        float V = 1 / (neighbor_pos.w);
+        float V = (neighbor_pos.w);  // position_d.w stores 1/density
         float kernel_r = kDevSysPara.kernel - dis;
 
         float temp_pres_kn = V * (self_data->ev.w + neighbor_ev.w) * kernel_r * kernel_r;
@@ -513,7 +513,7 @@ void knComputeForceTRA(ParticleBufferList buff_list, int *cell_offset, int *cell
     self_data.grad_color *= kDevSysPara.grad_poly6 * kDevSysPara.mass;
     self_data.lplc_color *= kDevSysPara.lplc_poly6 * kDevSysPara.mass;
 
-    self_data.lplc_color = __fdividef(self_data.lplc_color, self_data.pos.w);
+    self_data.lplc_color = self_data.lplc_color * self_data.pos.w;  // pos.w holds 1/density (loaded from position_d)
     float sur_nor_sq = self_data.grad_color.x * self_data.grad_color.x +
                        self_data.grad_color.y * self_data.grad_color.y +
                        self_data.grad_color.z * self_data.grad_color.z;
@@ -667,7 +667,7 @@ void kncomputeForceHybrid128n(int *cell_offset_M,ParticleIdxRange range, Particl
         self_data.grad_color *= kDevSysPara.grad_poly6 * kDevSysPara.mass;
         self_data.lplc_color *= kDevSysPara.lplc_poly6 * kDevSysPara.mass;
 
-        self_data.lplc_color = __fdividef(self_data.lplc_color, self_data.pos.w);
+        self_data.lplc_color = self_data.lplc_color * self_data.pos.w;  // pos.w holds 1/density (loaded from position_d)
         float sur_nor = sqrtf(self_data.grad_color.x * self_data.grad_color.x +
                               self_data.grad_color.y * self_data.grad_color.y +
                               self_data.grad_color.z * self_data.grad_color.z);
@@ -781,7 +781,7 @@ void kncomputeForceHybrid128n(int *cell_offset_M,ParticleIdxRange range, Particl
             self_data.grad_color *= kDevSysPara.grad_poly6 * kDevSysPara.mass;
             self_data.lplc_color *= kDevSysPara.lplc_poly6 * kDevSysPara.mass;
 
-            self_data.lplc_color = __fdividef(self_data.lplc_color, self_data.pos.w);
+            self_data.lplc_color = self_data.lplc_color * self_data.pos.w;  // pos.w holds 1/density (loaded from position_d)
             float sur_nor_sq = self_data.grad_color.x * self_data.grad_color.x +
                                self_data.grad_color.y * self_data.grad_color.y +
                                self_data.grad_color.z * self_data.grad_color.z;

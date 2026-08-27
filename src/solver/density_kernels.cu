@@ -81,7 +81,8 @@ void knComputeDensitySMS(ParticleBufferList buff_list, int *cell_offset, int *ce
     {
         data.pos.w *= kDevSysPara.mass * kDevSysPara.poly6_value;
         data.pos.w += kDevSysPara.self_density;
-        buff_list.position_d[self_idx].w = data.pos.w < kFloatSmall ? kDevSysPara.rest_density : data.pos.w;
+        float stored_density = data.pos.w < kFloatSmall ? kDevSysPara.rest_density : data.pos.w;
+        buff_list.position_d[self_idx].w = __fdividef(1.0f, stored_density);  // position_d.w stores 1/density
         buff_list.pressure[self_idx] = (powf_7(__fdividef(data.pos.w, kDevSysPara.rest_density)) - 1) * kDevSysPara.gas_constant;
     }
 }
@@ -127,7 +128,8 @@ void knComputeDensitySMS64(ParticleBufferList buff_list, int *cell_offset, int *
     {
         data.pos.w *= kDevSysPara.mass * kDevSysPara.poly6_value;
         data.pos.w += kDevSysPara.self_density;
-        buff_list.position_d[self_idx].w = data.pos.w < kFloatSmall ? kDevSysPara.rest_density : data.pos.w;
+        float stored_density = data.pos.w < kFloatSmall ? kDevSysPara.rest_density : data.pos.w;
+        buff_list.position_d[self_idx].w = __fdividef(1.0f, stored_density);  // position_d.w stores 1/density
         buff_list.evaluated_velocity[self_idx].w = (powf_7(__fdividef(data.pos.w, kDevSysPara.rest_density)) - 1) * kDevSysPara.gas_constant;
     }
 }
@@ -269,7 +271,7 @@ void knComputeDensityTRA(ParticleBufferList buff_list, int *cell_offset, int *ce
 
     self_data.pos.w *= kDevSysPara.mass * kDevSysPara.poly6_value;
     self_data.pos.w += kDevSysPara.self_density;
-    buff_list.position_d[self_idx].w = self_data.pos.w;
+    buff_list.position_d[self_idx].w = __fdividef(1.0f, self_data.pos.w);  // position_d.w stores 1/density
     buff_list.evaluated_velocity[self_idx].w = (__powf(__fdividef(self_data.pos.w, kDevSysPara.rest_density), 7) - 1) * kDevSysPara.gas_constant;
 }
 __global__
@@ -387,7 +389,7 @@ void kncomputeDensityHybrid128n(int *cell_offset_M, ParticleIdxRange range, Part
 
         self_data.pos.w *= kDevSysPara.mass * kDevSysPara.poly6_value;
         self_data.pos.w += kDevSysPara.self_density;
-        buff_list.position_d[self_idx].w = self_data.pos.w;
+        buff_list.position_d[self_idx].w = __fdividef(1.0f, self_data.pos.w);  // position_d.w stores 1/density
         buff_list.evaluated_velocity[self_idx].w = (powf_7(__fdividef(self_data.pos.w, kDevSysPara.rest_density)) - 1) * kDevSysPara.gas_constant;
 
 		float denv = (5000 - self_data.pos.w) / 6000;
@@ -467,7 +469,8 @@ void kncomputeDensityHybrid128n(int *cell_offset_M, ParticleIdxRange range, Part
         {
             data.pos.w *= kDevSysPara.mass * kDevSysPara.poly6_value;
             data.pos.w += kDevSysPara.self_density;
-            buff_list.position_d[self_idx].w = data.pos.w < kFloatSmall ? kDevSysPara.rest_density : data.pos.w;
+            float stored_density = data.pos.w < kFloatSmall ? kDevSysPara.rest_density : data.pos.w;
+            buff_list.position_d[self_idx].w = __fdividef(1.0f, stored_density);  // position_d.w stores 1/density
             buff_list.evaluated_velocity[self_idx].w = (powf_7(__fdividef(data.pos.w, kDevSysPara.rest_density)) - 1) * kDevSysPara.gas_constant;
 
 			float denv = (5000 - data.pos.w) / 6000;

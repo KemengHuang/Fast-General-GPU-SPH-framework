@@ -87,6 +87,13 @@ These paths are also hard-coded in:
 - **Grid-cell lookup uses precomputed reciprocals.** `ParticlePos2CellPos*` take
   `inv_cell_size` (multiplication), not `cell_size` (division); `SystemParameter::inv_cell_size`
   and `Arrangement::inv_cell_size_` are computed once at init.
+- **`position_d.w` stores 1/density, not density.** The density pass writes the reciprocal
+  (after the SMS-side clamp); the force pass and the integration kernels multiply by it
+  (`a * w` instead of `a / w`), eliminating the per-neighbor-pair reciprocal. Any new consumer
+  that needs the actual density must invert it at the use site.
+- **Do not hand-pipeline the SMS register-path loops with prefetching**: it pushes the force
+  kernel to 96 registers and roughly halves throughput (measured 2026-08-27). A 64-neighbor
+  batch variant (`shared_pos[128]`) was also evaluated and reverted — no measurable win.
 - **Broken legacy kernels are kept but marked.** `knComputeDensitySMS/SMS64`,
   `knComputeForceSMS/SMS64` have uninitialized `cell_id` (assignments commented out) — launching
   them is undefined behavior. They are not on the live path; do not call them without restoring
@@ -136,7 +143,8 @@ These paths are also hard-coded in:
   Measured on RTX 4090 / 3.94M particles, `0` is ~2% faster (over-provisioned block scheduling
   costs more than the sync).
 - **`__launch_bounds__(64, 10)` is enabled on the hybrid kernels** and validated spill-free
-  (density: 40 regs, force: 57 regs — check with `cuobjdump -res-usage` after changes).
+  (density: 40 regs, force: 57 regs — check with `cuobjdump -res-usage` after kernel edits;
+  the budget is 102 regs).
 - **Particle buffers are sized by exact particle count.** `initializeScene` counts the fluid
   blocks before allocating; `recomm_nump` in the scene JSON is only a fallback. (Previously
   `recomm_nump: 15500000` over-allocated ~1.9 GB of device/pinned memory for the default
