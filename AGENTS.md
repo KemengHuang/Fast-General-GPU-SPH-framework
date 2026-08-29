@@ -94,6 +94,9 @@ These paths are also hard-coded in:
 - **Do not hand-pipeline the SMS register-path loops with prefetching**: it pushes the force
   kernel to 96 registers and roughly halves throughput (measured 2026-08-27). A 64-neighbor
   batch variant (`shared_pos[128]`) was also evaluated and reverted — no measurable win.
+- **The production SMS layout is fixed at 32 particles per task and 64 threads per block.**
+  The two warps stay independent; pairing them widens spatial bounds and is slower. CMake option
+  `GSPH_USE_REGISTER_SMS` selects the register path (`ON`, default) or legacy shared A/B path.
 - **Broken legacy kernels are kept but marked.** `knComputeDensitySMS/SMS64`,
   `knComputeForceSMS/SMS64` have uninitialized `cell_id` (assignments commented out) — launching
   them is undefined behavior. They are not on the live path; do not call them without restoring
@@ -119,7 +122,8 @@ These paths are also hard-coded in:
 
 - **CUDA architecture is pinned to the local GPU.** `CMakeLists.txt` sets
   `CMAKE_CUDA_ARCHITECTURES` to `89` for the RTX 4090 workstation. Reconfigure after pulling
-  changes so the cache entry is updated.
+  changes so the cache entry is updated. Pass `-DCMAKE_CUDA_ARCHITECTURES=120` explicitly for
+  the RTX 5090 benchmark workstation.
 - **MSVC `/O2` is only added in Release/RelWithDebInfo.** Debug builds keep the default `/Od`
   and `/RTC1`; this avoids the "/O2 and /RTC1 are incompatible" error when building the
   `Debug` configuration in Visual Studio.
@@ -143,8 +147,8 @@ These paths are also hard-coded in:
   Measured on RTX 4090 / 3.94M particles, `0` is ~2% faster (over-provisioned block scheduling
   costs more than the sync).
 - **`__launch_bounds__(64, 10)` is enabled on the hybrid kernels** and validated spill-free
-  (density: 40 regs, force: 57 regs — check with `cuobjdump -res-usage` after kernel edits;
-  the budget is 102 regs).
+  on RTX 5090 / `sm_120` (register path density: 39 regs, force: 72 regs; no stack/local).
+  Recheck with `cuobjdump -res-usage` after kernel edits or when changing the target architecture.
 - **Particle buffers are sized by exact particle count.** `initializeScene` counts the fluid
   blocks before allocating; `recomm_nump` in the scene JSON is only a fallback. (Previously
   `recomm_nump: 15500000` over-allocated ~1.9 GB of device/pinned memory for the default

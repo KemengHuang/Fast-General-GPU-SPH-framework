@@ -63,6 +63,51 @@ inline ushort3 calCI(const ushort3& in){
     return outd;
 }
 
+__device__ __forceinline__ ParticleIdxRange findTraNeighborParticleRange(
+    const int *micro_cell_offsets, const int *cell_offsets,
+    const int *cell_particle_counts, const ushort3& coarse_cell,
+    int local_micro_x, int y_offset, int z_offset,
+    const ushort3& grid_size)
+{
+    const int neighbor_y = static_cast<int>(coarse_cell.y) + y_offset;
+    const int neighbor_z = static_cast<int>(coarse_cell.z) + z_offset;
+    if (neighbor_y < 0 || neighbor_y >= grid_size.y ||
+        neighbor_z < 0 || neighbor_z >= grid_size.z)
+        return ParticleIdxRange(0, 0);
+
+    ushort3 neighbor_cell = make_ushort3(
+        coarse_cell.x - 1, neighbor_y, neighbor_z);
+    const int left_cell = CellPos2CellIdx(neighbor_cell, grid_size);
+    ++neighbor_cell.x;
+    const int middle_cell = CellPos2CellIdx(neighbor_cell, grid_size);
+    ++neighbor_cell.x;
+    const int right_cell = CellPos2CellIdx(neighbor_cell, grid_size);
+
+    const int begin = left_cell == kInvalidCellIdx
+        ? __ldg(&cell_offsets[middle_cell])
+        : __ldg(&micro_cell_offsets[
+            (left_cell << 6) + (local_micro_x << 4)]);
+    int count = __ldg(&cell_particle_counts[middle_cell]);
+    if (left_cell != kInvalidCellIdx)
+        count += __ldg(&cell_offsets[middle_cell]) - begin;
+
+    if (right_cell != kInvalidCellIdx)
+    {
+        if (local_micro_x == 3)
+        {
+            count += __ldg(&cell_particle_counts[right_cell]);
+        }
+        else
+        {
+            const int right_micro_begin = right_cell << 6;
+            count += __ldg(&micro_cell_offsets[
+                right_micro_begin + ((local_micro_x + 1) << 4)])
+                - __ldg(&micro_cell_offsets[right_micro_begin]);
+        }
+    }
+    return ParticleIdxRange(begin, begin + count);
+}
+
 
 
 const int kNumSharedData = 32;
@@ -469,328 +514,95 @@ private:
 	char iminz[rate];
 	char imaxz[rate];
 };
-class SimDenRegData128
+class SmsRegisterTaskIterator
 {
 public:
-    __device__ SimDenRegData128(){}
+    static constexpr int kNeighborRowCount = 9;
 
-	__device__ void initialize(const int& minz, const int& maxz, const int& min, const int& max, int *celloffM, const int& isSame, int *cell_offset, int *cell_nump, ushort3 &cell_pos, const ushort3 &grid_size) {
-        unsigned int idx = threadIdx.x;
-        int bi = (idx>>5);
-        int bj = idx % 32+(isSame)*(bi<<5);
-        if (bj < 9) {
-            int kk = bi * 9 + bj;
-            ushort3 neighbor_pos = cell_pos + make_ushort3(-1, bj % 3 - 1, bj / 3 % 3 - 1);
-            if (neighbor_pos.y < 0 || neighbor_pos.y >= grid_size.y ||
-                neighbor_pos.z < 0 || neighbor_pos.z >= grid_size.z) {
-                cell_offset_[kk] = 0;
-                cell_nump_[kk] = 0;
-            }
-			else {
-				int nid_left, nid_mid, nid_right;
-				nid_left = CellPos2CellIdx(neighbor_pos, grid_size);
-				++neighbor_pos.x;
-				nid_mid = CellPos2CellIdx(neighbor_pos, grid_size);
-				++neighbor_pos.x;
-				nid_right = CellPos2CellIdx(neighbor_pos, grid_size);
-				cell_offset_[kk] =
-					kInvalidCellIdx == nid_left ? cell_offset[nid_mid] : celloffM[(nid_left << 6) + (min << 4)];
-				int nc = 1;
-				int my_cell_nump = cell_nump[nid_mid];
-				if (kInvalidCellIdx != nid_left) {
-					my_cell_nump += cell_offset[nid_mid] - celloffM[(nid_left << 6) + (min << 4)];
-					nc++;
-				}//cell_nump[nid_left];
-				if (max == 3){
-					if (kInvalidCellIdx != nid_right) {
-						my_cell_nump += cell_nump[nid_right];
-						nc++;
-					}
-				}
-				else{
-					if (kInvalidCellIdx != nid_right) {
-						my_cell_nump += celloffM[(nid_right << 6) + ((max + 1) << 4)] - celloffM[(nid_right << 6)];//cell_nump[nid_right];
-						nc++;
-					}
-				}
-				int leftl = (kInvalidCellIdx == nid_left ? 0 : 4 - min);
-				int rightl = (kInvalidCellIdx == nid_right ? 0 : 1 + max);
-				int leng = 4 + leftl + rightl;
-
-				if (my_cell_nump > leng * 22){
-					if (((minz > 0) && ((kk % 9) < 3))){
-						int begin_ = kInvalidCellIdx == nid_left ? (nid_mid << 6) : (nid_left << 6) + (min << 4);
-						cell_begin[kk] = begin_;
-						if (my_cell_nump>0){
-							int lay = 0;
-							while ((celloffM[begin_ + ((lay + 1) << 4)] - celloffM[begin_ + (minz << 2) + (lay << 4)]) == 0){
-								lay++;
-								if (lay >= leng){
-									my_cell_nump = 0;
-								}
-							}
-						}
-					}
-					else if (((maxz < 3) && ((kk % 9) > 5))){
-						int begin_ = kInvalidCellIdx == nid_left ? (nid_mid << 6) : (nid_left << 6) + (min << 4);
-						cell_begin[kk] = begin_;
-						if (my_cell_nump > 0){
-							int lay = 0;
-							while ((celloffM[begin_ + (lay << 4) + ((maxz + 1) << 2)] - celloffM[begin_ + (lay << 4)]) == 0){
-								lay++;
-								if (lay >= leng){
-									my_cell_nump = 0;
-								}
-							}
-						}
-					}
-					else{
-						cell_begin[kk] = -1;
-					}
-				}
-				else{
-					cell_begin[kk] = -1;
-				}
-				cell_nump_[kk] = my_cell_nump;
-			}
-        }
-		if (bj == 31){
-			ushort3 neighbor_pos = cell_pos + make_ushort3(-1, 0, 0);
-			int nid_left, nid_mid, nid_right;
-			nid_left = CellPos2CellIdx(neighbor_pos, grid_size);
-			++neighbor_pos.x;
-			nid_mid = CellPos2CellIdx(neighbor_pos, grid_size);
-			++neighbor_pos.x;
-			nid_right = CellPos2CellIdx(neighbor_pos, grid_size);
-			int leftl = (kInvalidCellIdx == nid_left ? 0 : 4 - min);
-			int rightl = (kInvalidCellIdx == nid_right ? 0 : 1+max);
-			length[bi] = 4 + leftl + rightl;
-			iminz[bi] = minz;
-			imaxz[bi] = maxz;
-		}
-		depth[idx] = 0;
-		int noCombie = (1 - isSame);
-		current_cell_index_[idx] = 9 + bi * 9 * noCombie;
-        offset_in_cell_[idx] = 0;
-		__syncthreads();
-		for (int i = bi * 9 * noCombie; i < bi * 9 * noCombie + 9; i += 1) {
-            if (0 != cell_nump_[i]) {
-                current_cell_index_[idx] = i;
-                break;
-            }
-        }
-    }
-
-	__device__ int read32DataReg(int *celloffM, const int& isSame, const ParticleBufferList& buff_list, float4& my_pos) {
-		unsigned int idx = threadIdx.x;
-		int bi = (idx >> 5);
-		int bj = idx % 32 + (isSame)*(bi << 5);
-		int noCombine = (1 - isSame);
-		int readDataSize = kNumSharedData*(1 + isSame);
-		int curr_cell_index = current_cell_index_[idx];
-		if (9 + bi * 9 * noCombine <= curr_cell_index) return 0;
-		int cell_begin_ = cell_begin[curr_cell_index];
-		if (cell_begin_ == -1){
-			int offset_in_cell = offset_in_cell_[idx];
-			int remain_nump = cell_nump_[curr_cell_index] - offset_in_cell;
-			int num_read = remain_nump > readDataSize ? readDataSize : remain_nump;
-			if (num_read > bj) {
-				int read_idx = cell_offset_[curr_cell_index] + offset_in_cell + bj;
-				my_pos = __ldg(&buff_list.position_d[read_idx]);
-			}
-			if (remain_nump > readDataSize) offset_in_cell_[idx] += readDataSize;
-			else {
-				int next_cell_idx = curr_cell_index + 1;
-				while (next_cell_idx < 9 + bi * 9 * noCombine) {
-					if (0 != cell_nump_[next_cell_idx]) break;
-					++next_cell_idx;
-				}
-				current_cell_index_[idx] = next_cell_idx;
-				offset_in_cell_[idx] = 0;
-			}
-			return num_read;
-		}
-		else{
-			int min = iminz[bi*(1 - isSame)];
-			int max = imaxz[bi*(1 - isSame)];
-			int lgth = length[bi*(1 - isSame)];
-			if (((min > 0) && ((curr_cell_index % 9) < 3))){
-				int lay = depth[idx];
-				while ((celloffM[cell_begin_ + ((lay + 1) << 4)] - celloffM[cell_begin_ + (min << 2) + (lay << 4)]) == 0){
-					lay++;
-				}
-				depth[idx] = lay;
-				int celloff = celloffM[cell_begin_ + (min << 2) + (lay << 4)];
-				int offset_in_cell = offset_in_cell_[idx];
-				int remain_nump = celloffM[cell_begin_ + ((lay + 1) << 4)] - celloff - offset_in_cell;
-				int num_read = remain_nump > readDataSize ? readDataSize : remain_nump;
-				if (num_read > bj) {
-					int read_idx = celloff + offset_in_cell + bj;
-					my_pos = __ldg(&buff_list.position_d[read_idx]);
-				}
-				if (remain_nump > readDataSize) offset_in_cell_[idx] += readDataSize;
-				else {
-					depth[idx]++;
-					if (depth[idx] < lgth){
-						while ((celloffM[cell_begin_ + ((depth[idx] + 1) << 4)] - celloffM[cell_begin_ + (min << 2) + (depth[idx] << 4)]) == 0){
-							depth[idx]++;
-							if (depth[idx] >= lgth) break;
-						}
-					}
-					if (depth[idx] >= lgth){
-						int next_cell_idx = curr_cell_index + 1;
-						while (next_cell_idx < 9 + bi * 9 * noCombine) {
-							if (0 != cell_nump_[next_cell_idx]) break;
-							++next_cell_idx;
-						}
-						current_cell_index_[idx] = next_cell_idx;
-						depth[idx] = 0;
-					}
-					offset_in_cell_[idx] = 0;
-				}
-				return num_read;
-			}
-			else if (((max < 3) && ((curr_cell_index % 9) > 5))){
-				int lay = depth[idx];
-				while ((celloffM[cell_begin_ + (lay << 4) + ((max + 1) << 2)] - celloffM[cell_begin_ + (lay << 4)]) == 0){
-					lay++;
-				}
-				depth[idx] = lay;
-
-
-				int celloff = celloffM[cell_begin_ + (lay << 4)];
-
-				int offset_in_cell = offset_in_cell_[idx];
-				int remain_nump = celloffM[cell_begin_ + (lay << 4) + ((max + 1) << 2)] - celloff - offset_in_cell;
-
-				int num_read = remain_nump > readDataSize ? readDataSize : remain_nump;
-				if (num_read > bj) {
-					int read_idx = celloff + offset_in_cell + bj;
-					my_pos = __ldg(&buff_list.position_d[read_idx]);
-				}
-				if (remain_nump > readDataSize) offset_in_cell_[idx] += readDataSize;
-				else {
-					depth[idx]++;
-					if (depth[idx] < lgth){
-						while ((celloffM[cell_begin_ + (depth[idx] << 4) + ((max + 1) << 2)] - celloffM[cell_begin_ + (depth[idx] << 4)]) == 0){
-							depth[idx]++;
-							if (depth[idx] >= lgth) break;
-						}
-					}
-					if (depth[idx] >= lgth){
-						int next_cell_idx = curr_cell_index + 1;
-						while (next_cell_idx < 9 + bi * 9 * noCombine) {
-							if (0 != cell_nump_[next_cell_idx]) break;
-							++next_cell_idx;
-						}
-						current_cell_index_[idx] = next_cell_idx;
-						depth[idx] = 0;
-					}
-					offset_in_cell_[idx] = 0;
-				}
-				return num_read;
-			}
-		}
-	}
-private:
-    int cell_offset_[9 * rate];
-    int cell_nump_[9 * rate];
-	int cell_begin[9 * rate];
-	uint offset_in_cell_[kNumSharedData * rate];
-    char current_cell_index_[kNumSharedData * rate];
-	char depth[kNumSharedData * rate];
-	char length[rate];
-	char iminz[rate];
-	char imaxz[rate];
-};
-
-// Warp-local metadata and traversal state for the optimized SMS path.  It
-// applies the task's x/y/z micro-cell bounds without shared iterator state.
-class SimRegTaskIterator128
-{
-public:
     __device__ __forceinline__ void initialize(
-        int minx, int maxx, int miny, int maxy, int minz, int maxz,
-        int *celloffM, const ushort3 &cell_pos, const ushort3 &grid_size,
-        int& iterator_cell, int& iterator_offset, int& iterator_segment)
+        int min_x, int max_x, int min_y, int max_y, int min_z, int max_z,
+        const int *micro_cell_offsets, const ushort3 &cell_pos,
+        const ushort3 &grid_size, int& iterator_cell, int& iterator_offset,
+        int& iterator_segment)
     {
-        const int task_lane = threadIdx.x % SMS_TASK_PARTICLES;
-        const int task_in_block = threadIdx.x / SMS_TASK_PARTICLES;
-        const int metadata_base = task_in_block * 9;
+        const int task_lane = threadIdx.x & (kSmsTaskParticles - 1);
+        const int task_in_block = threadIdx.x >> 5;
+        const int metadata_base = task_in_block * kNeighborRowCount;
 
-        for (int task_slot = task_lane; task_slot < 9; task_slot += SMS_TASK_PARTICLES)
+        for (int neighbor_slot = task_lane;
+             neighbor_slot < kNeighborRowCount;
+             neighbor_slot += kSmsTaskParticles)
         {
-            const int y_offset = task_slot % 3 - 1;
-            const int z_offset = task_slot / 3 - 1;
-            ushort3 neighbor_pos = cell_pos + make_ushort3(-1, y_offset, z_offset);
-            int left_id = CellPos2CellIdx(neighbor_pos, grid_size);
-            ++neighbor_pos.x;
-            int middle_id = CellPos2CellIdx(neighbor_pos, grid_size);
-            ++neighbor_pos.x;
-            int right_id = CellPos2CellIdx(neighbor_pos, grid_size);
-            const int metadata_index = metadata_base + task_slot;
+            const int y_offset = neighbor_slot % 3 - 1;
+            const int z_offset = neighbor_slot / 3 - 1;
+            ushort3 neighbor_cell = cell_pos + make_ushort3(-1, y_offset, z_offset);
+            int left_cell_id = CellPos2CellIdx(neighbor_cell, grid_size);
+            ++neighbor_cell.x;
+            int middle_cell_id = CellPos2CellIdx(neighbor_cell, grid_size);
+            ++neighbor_cell.x;
+            int right_cell_id = CellPos2CellIdx(neighbor_cell, grid_size);
+            const int metadata_index = metadata_base + neighbor_slot;
 
-            if (middle_id == kInvalidCellIdx)
+            if (middle_cell_id == kInvalidCellIdx)
             {
-                micro_begin_[metadata_index] = 0;
-                particle_count_[metadata_index] = 0;
+                micro_cell_begin_[metadata_index] = 0;
+                candidate_particle_count_[metadata_index] = 0;
                 x_count_[metadata_index] = 0;
                 z_begin_[metadata_index] = 0;
                 z_count_[metadata_index] = 0;
                 y_begin_[metadata_index] = 0;
                 y_count_[metadata_index] = 0;
-                segmented_[metadata_index] = 0;
+                requires_segmentation_[metadata_index] = 0;
             }
             else
             {
-                const int left_count = left_id == kInvalidCellIdx ? 0 : 4 - minx;
-                const int right_count = right_id == kInvalidCellIdx ? 0 : maxx + 1;
+                const int left_count = left_cell_id == kInvalidCellIdx ? 0 : 4 - min_x;
+                const int right_count = right_cell_id == kInvalidCellIdx ? 0 : max_x + 1;
                 const int x_count = left_count + 4 + right_count;
-                const int micro_begin = left_id == kInvalidCellIdx
-                    ? (middle_id << 6)
-                    : (left_id << 6) + (minx << 4);
+                const int micro_cell_begin = left_cell_id == kInvalidCellIdx
+                    ? (middle_cell_id << 6)
+                    : (left_cell_id << 6) + (min_x << 4);
 
-                const int y_begin = y_offset < 0 ? miny : 0;
-                const int y_end = y_offset > 0 ? maxy : 3;
-                const int z_begin = z_offset < 0 ? minz : 0;
-                const int z_end = z_offset > 0 ? maxz : 3;
+                const int y_begin = y_offset < 0 ? min_y : 0;
+                const int y_end = y_offset > 0 ? max_y : 3;
+                const int z_begin = z_offset < 0 ? min_z : 0;
+                const int z_end = z_offset > 0 ? max_z : 3;
 
-                micro_begin_[metadata_index] = micro_begin;
-                particle_count_[metadata_index] =
-                    __ldg(&celloffM[micro_begin + (x_count << 4)]) -
-                    __ldg(&celloffM[micro_begin]);
+                micro_cell_begin_[metadata_index] = micro_cell_begin;
+                candidate_particle_count_[metadata_index] =
+                    __ldg(&micro_cell_offsets[
+                        micro_cell_begin + (x_count << 4)]) -
+                    __ldg(&micro_cell_offsets[micro_cell_begin]);
                 x_count_[metadata_index] = static_cast<unsigned char>(x_count);
                 z_begin_[metadata_index] = static_cast<unsigned char>(z_begin);
                 z_count_[metadata_index] = static_cast<unsigned char>(z_end - z_begin + 1);
                 y_begin_[metadata_index] = static_cast<unsigned char>(y_begin);
                 y_count_[metadata_index] = static_cast<unsigned char>(y_end - y_begin + 1);
-                segmented_[metadata_index] =
-                    static_cast<unsigned char>(y_begin != 0 || y_end != 3 || z_begin != 0 || z_end != 3);
+                requires_segmentation_[metadata_index] =
+                    static_cast<unsigned char>(
+                        y_begin != 0 || y_end != 3 ||
+                        z_begin != 0 || z_end != 3);
             }
         }
 
         iterator_cell = metadata_base;
         iterator_offset = 0;
         iterator_segment = 0;
-#if SMS_TASK_PARTICLES == 32
-        __syncwarp(0xFFFFFFFFu);
-#else
-        const int subgroup_start = ((threadIdx.x & 31) / SMS_TASK_PARTICLES) * SMS_TASK_PARTICLES;
-        const unsigned int subgroup_mask = ((1u << SMS_TASK_PARTICLES) - 1u) << subgroup_start;
-        __syncwarp(subgroup_mask);
-#endif
+        __syncwarp(kFullWarpMask);
     }
 
     __device__ __forceinline__ int nextBatch(
-        int *celloffM, int& read_base,
+        const int *micro_cell_offsets, int& neighbor_begin,
         int& iterator_cell, int& iterator_offset, int& iterator_segment)
     {
-        const int metadata_end = (threadIdx.x / SMS_TASK_PARTICLES + 1) * 9;
+        const int metadata_end =
+            ((threadIdx.x >> 5) + 1) * kNeighborRowCount;
 
         while (iterator_cell < metadata_end)
         {
-            const int total_count = particle_count_[iterator_cell];
-            if (total_count <= 0)
+            const int candidate_count =
+                candidate_particle_count_[iterator_cell];
+            if (candidate_count <= 0)
             {
                 ++iterator_cell;
                 iterator_offset = 0;
@@ -798,15 +610,17 @@ public:
                 continue;
             }
 
-            const int micro_begin = micro_begin_[iterator_cell];
-            if (segmented_[iterator_cell] == 0)
+            const int micro_cell_begin = micro_cell_begin_[iterator_cell];
+            if (requires_segmentation_[iterator_cell] == 0)
             {
-                const int remaining = total_count - iterator_offset;
-                const int read_count = remaining > SMS_TASK_PARTICLES ? SMS_TASK_PARTICLES : remaining;
-                read_base = __ldg(&celloffM[micro_begin]) + iterator_offset;
-                if (remaining > SMS_TASK_PARTICLES)
+                const int remaining = candidate_count - iterator_offset;
+                const int neighbor_count = remaining > kSmsTaskParticles
+                    ? kSmsTaskParticles : remaining;
+                neighbor_begin = __ldg(&micro_cell_offsets[micro_cell_begin])
+                    + iterator_offset;
+                if (remaining > kSmsTaskParticles)
                 {
-                    iterator_offset += SMS_TASK_PARTICLES;
+                    iterator_offset += kSmsTaskParticles;
                 }
                 else
                 {
@@ -814,7 +628,7 @@ public:
                     iterator_offset = 0;
                     iterator_segment = 0;
                 }
-                return read_count;
+                return neighbor_count;
             }
 
             const int x_count = x_count_[iterator_cell];
@@ -831,19 +645,24 @@ public:
                 int segment_end;
                 if (full_y)
                 {
-                    segment_begin = micro_begin + (iterator_segment << 4) + (z_begin << 2);
+                    segment_begin = micro_cell_begin
+                        + (iterator_segment << 4) + (z_begin << 2);
                     segment_end = segment_begin + (z_count << 2);
                 }
                 else
                 {
                     const int x_layer = iterator_segment / z_count;
-                    const int z_layer = z_begin + iterator_segment - x_layer * z_count;
-                    segment_begin = micro_begin + (x_layer << 4) + (z_layer << 2) + y_begin;
+                    const int z_layer = z_begin + iterator_segment
+                        - x_layer * z_count;
+                    segment_begin = micro_cell_begin + (x_layer << 4)
+                        + (z_layer << 2) + y_begin;
                     segment_end = segment_begin + y_count;
                 }
 
-                const int particle_begin = __ldg(&celloffM[segment_begin]);
-                const int segment_particles = __ldg(&celloffM[segment_end]) - particle_begin;
+                const int particle_begin =
+                    __ldg(&micro_cell_offsets[segment_begin]);
+                const int segment_particles =
+                    __ldg(&micro_cell_offsets[segment_end]) - particle_begin;
                 const int remaining = segment_particles - iterator_offset;
                 if (remaining <= 0)
                 {
@@ -852,18 +671,19 @@ public:
                     continue;
                 }
 
-                const int read_count = remaining > SMS_TASK_PARTICLES ? SMS_TASK_PARTICLES : remaining;
-                read_base = particle_begin + iterator_offset;
-                if (remaining > SMS_TASK_PARTICLES)
+                const int neighbor_count = remaining > kSmsTaskParticles
+                    ? kSmsTaskParticles : remaining;
+                neighbor_begin = particle_begin + iterator_offset;
+                if (remaining > kSmsTaskParticles)
                 {
-                    iterator_offset += SMS_TASK_PARTICLES;
+                    iterator_offset += kSmsTaskParticles;
                 }
                 else
                 {
                     ++iterator_segment;
                     iterator_offset = 0;
                 }
-                return read_count;
+                return neighbor_count;
             }
             ++iterator_cell;
             iterator_offset = 0;
@@ -874,14 +694,15 @@ public:
     }
 
 private:
-    int micro_begin_[9 * SMS_TASKS_PER_BLOCK];
-    int particle_count_[9 * SMS_TASKS_PER_BLOCK];
-    unsigned char x_count_[9 * SMS_TASKS_PER_BLOCK];
-    unsigned char z_begin_[9 * SMS_TASKS_PER_BLOCK];
-    unsigned char z_count_[9 * SMS_TASKS_PER_BLOCK];
-    unsigned char y_begin_[9 * SMS_TASKS_PER_BLOCK];
-    unsigned char y_count_[9 * SMS_TASKS_PER_BLOCK];
-    unsigned char segmented_[9 * SMS_TASKS_PER_BLOCK];
+    int micro_cell_begin_[kNeighborRowCount * kSmsTasksPerBlock];
+    int candidate_particle_count_[kNeighborRowCount * kSmsTasksPerBlock];
+    unsigned char x_count_[kNeighborRowCount * kSmsTasksPerBlock];
+    unsigned char z_begin_[kNeighborRowCount * kSmsTasksPerBlock];
+    unsigned char z_count_[kNeighborRowCount * kSmsTasksPerBlock];
+    unsigned char y_begin_[kNeighborRowCount * kSmsTasksPerBlock];
+    unsigned char y_count_[kNeighborRowCount * kSmsTasksPerBlock];
+    unsigned char requires_segmentation_[
+        kNeighborRowCount * kSmsTasksPerBlock];
 };
 
 class SimForSharedData
@@ -1251,264 +1072,6 @@ private:
 // Register-only metadata helper for the force SMS path.
 // Neighbor positions and evaluated velocities are loaded into caller-owned
 // registers; exchange is done through a small warp-level shared buffer.
-class SimForRegData128
-{
-public:
-    __device__ SimForRegData128(){}
-
-	__device__ void initialize(const int& minz, const int& maxz, const int& min, const int& max, int *celloffM, const int& isSame, int *cell_offset, int *cell_nump, const ushort3 &cell_pos, const ushort3 &grid_size) {
-        unsigned int idx = threadIdx.x;
-		int bi = (idx>>5);
-		int bj = idx % 32+(isSame)*(bi<<5);
-
-        if (bj < 9) {
-
-            int kk = bi * 9 + bj;
-
-			ushort3 neighbor_pos = cell_pos + make_ushort3(-1, bj % 3 - 1, bj / 3 % 3 - 1);
-            if (neighbor_pos.y < 0 || neighbor_pos.y >= grid_size.y ||
-                neighbor_pos.z < 0 || neighbor_pos.z >= grid_size.z) {
-                cell_offset_[kk] = 0;
-                cell_nump_[kk] = 0;
-            }
-            else {
-				int nid_left, nid_mid, nid_right;
-				nid_left = CellPos2CellIdx(neighbor_pos, grid_size);
-				++neighbor_pos.x;
-				nid_mid = CellPos2CellIdx(neighbor_pos, grid_size);
-				++neighbor_pos.x;
-				nid_right = CellPos2CellIdx(neighbor_pos, grid_size);
-				cell_offset_[kk] =
-					kInvalidCellIdx == nid_left ? cell_offset[nid_mid] : celloffM[(nid_left << 6) + (min << 4)];
-				int nc = 1;
-				int my_cell_nump = cell_nump[nid_mid];
-				if (kInvalidCellIdx != nid_left) {
-					my_cell_nump += cell_offset[nid_mid] - celloffM[(nid_left << 6) + (min << 4)];
-					nc++;
-				}
-				if (max == 3){
-					if (kInvalidCellIdx != nid_right) {
-						my_cell_nump += cell_nump[nid_right];
-						nc++;
-					}
-				}
-				else{
-					if (kInvalidCellIdx != nid_right) {
-						my_cell_nump += celloffM[(nid_right << 6) + ((max + 1) << 4)] - celloffM[(nid_right << 6)];
-						nc++;
-					}
-				}
-				int leftl = (kInvalidCellIdx == nid_left ? 0 : 4 - min);
-				int rightl = (kInvalidCellIdx == nid_right ? 0 : 1 + max);
-				int leng = 4 + leftl + rightl;
-
-				if (my_cell_nump > leng * 22){
-					if (((minz > 0) && ((kk % 9) < 3))){
-						int begin_ = kInvalidCellIdx == nid_left ? (nid_mid << 6) : (nid_left << 6) + (min << 4);
-						cell_begin[kk] = begin_;
-						if (my_cell_nump>0){
-							int lay = 0;
-							while ((celloffM[begin_ + ((lay + 1) << 4)] - celloffM[begin_ + (minz << 2) + (lay << 4)]) == 0){
-								lay++;
-								if (lay >= leng){
-									my_cell_nump = 0;
-								}
-							}
-						}
-					}
-					else if (((maxz < 3) && ((kk % 9) > 5))){
-						int begin_ = kInvalidCellIdx == nid_left ? (nid_mid << 6) : (nid_left << 6) + (min << 4);
-						cell_begin[kk] = begin_;
-						if (my_cell_nump > 0){
-							int lay = 0;
-							while ((celloffM[begin_ + (lay << 4) + ((maxz + 1) << 2)] - celloffM[begin_ + (lay << 4)]) == 0){
-								lay++;
-								if (lay >= leng){
-									my_cell_nump = 0;
-								}
-							}
-						}
-					}
-					else{
-						cell_begin[kk] = -1;
-					}
-				}
-				else{
-					cell_begin[kk] = -1;
-				}
-				cell_nump_[kk] = my_cell_nump;
-			}
-        }
-
-		if (bj == 31){
-			ushort3 neighbor_pos = cell_pos + make_ushort3(-1, 0, 0);
-			int nid_left, nid_mid, nid_right;
-			nid_left = CellPos2CellIdx(neighbor_pos, grid_size);
-			++neighbor_pos.x;
-			nid_mid = CellPos2CellIdx(neighbor_pos, grid_size);
-			++neighbor_pos.x;
-			nid_right = CellPos2CellIdx(neighbor_pos, grid_size);
-			int leftl = (kInvalidCellIdx == nid_left ? 0 : 4 - min);
-			int rightl = (kInvalidCellIdx == nid_right ? 0 : 1 + max);
-			length[bi] = 4 + leftl + rightl;
-			iminz[bi] = minz;
-			imaxz[bi] = maxz;
-		}
-		depth[idx] = 0;
-
-		int noCombine = 1 - isSame;
-
-		current_cell_index_[idx] = 9 + bi * 9 * noCombine;
-        offset_in_cell_[idx] = 0;
-		__syncthreads();
-		for (int i = bi * 9 * noCombine; i < bi * 9 * noCombine + 9; i += 1) {
-            if (0 != cell_nump_[i]) {
-                current_cell_index_[idx] = i;
-                break;
-            }
-        }
-    }
-
-	__device__ int read32DataReg(int *celloffM, const int& isSame, const ParticleBufferList& buff_list, float4& my_pos, float4& my_ev) {
-        unsigned int idx = threadIdx.x;
-		int bi = (idx >> 5);
-		int bj = idx % 32 + (isSame)*(bi << 5);
-
-        int curr_cell_index = current_cell_index_[idx];
-		int noCombine = 1 - isSame;
-		int readDataSize = kNumSharedData*(1 + isSame);
-        // neighbors read complete
-		if (9 + bi * 9 * noCombine <= curr_cell_index) return 0;
-		int cell_begin_ = cell_begin[curr_cell_index];
-		if (cell_begin_ == -1){
-			int offset_in_cell = offset_in_cell_[idx];
-			int remain_nump = cell_nump_[curr_cell_index] - offset_in_cell;
-			int num_read = remain_nump > readDataSize ? readDataSize : remain_nump;
-			if (num_read > bj) {
-				int read_idx = cell_offset_[curr_cell_index] + offset_in_cell + bj;
-				my_pos = __ldg(&buff_list.position_d[read_idx]);
-				my_ev  = __ldg(&buff_list.evaluated_velocity[read_idx]);
-			}
-			if (remain_nump > readDataSize) offset_in_cell_[idx] += readDataSize;
-			else {
-				int next_cell_idx = curr_cell_index + 1;
-				while (next_cell_idx < 9 + bi * 9 * noCombine) {
-					if (0 != cell_nump_[next_cell_idx]) break;
-					++next_cell_idx;
-				}
-				current_cell_index_[idx] = next_cell_idx;
-				offset_in_cell_[idx] = 0;
-			}
-			return num_read;
-		}
-		else{
-			int min = iminz[bi*(1 - isSame)];
-			int max = imaxz[bi*(1 - isSame)];
-			int lgth = length[bi*(1 - isSame)];
-			if (((min > 0) && ((curr_cell_index % 9) < 3))){
-				int lay = depth[idx];
-				while ((celloffM[cell_begin_ + ((lay + 1) << 4)] - celloffM[cell_begin_ + (min << 2) + (lay << 4)]) == 0){
-					lay++;
-				}
-				depth[idx] = lay;
-				int celloff = celloffM[cell_begin_ + (min << 2) + (lay << 4)];
-				int offset_in_cell = offset_in_cell_[idx];
-				int remain_nump = celloffM[cell_begin_ + ((lay + 1) << 4)] - celloff - offset_in_cell;
-				int num_read = remain_nump > readDataSize ? readDataSize : remain_nump;
-				if (num_read > bj) {
-					int read_idx = celloff + offset_in_cell + bj;
-					my_pos = __ldg(&buff_list.position_d[read_idx]);
-					my_ev  = __ldg(&buff_list.evaluated_velocity[read_idx]);
-				}
-				if (remain_nump > readDataSize) offset_in_cell_[idx] += readDataSize;
-				else {
-					depth[idx]++;
-					if (depth[idx] < lgth){
-						while ((celloffM[cell_begin_ + ((depth[idx] + 1) << 4)] - celloffM[cell_begin_ + (min << 2) + (depth[idx] << 4)]) == 0){
-							depth[idx]++;
-							if (depth[idx] >= lgth) break;
-						}
-					}
-					if (depth[idx] >= lgth){
-						int next_cell_idx = curr_cell_index + 1;
-						while (next_cell_idx < 9 + bi * 9 * noCombine) {
-							if (0 != cell_nump_[next_cell_idx]) break;
-							++next_cell_idx;
-						}
-						current_cell_index_[idx] = next_cell_idx;
-						depth[idx] = 0;
-					}
-					offset_in_cell_[idx] = 0;
-				}
-				return num_read;
-			}
-			else if (((max < 3) && ((curr_cell_index % 9) > 5))){
-				int lay = depth[idx];
-				while ((celloffM[cell_begin_ + (lay << 4) + ((max + 1) << 2)] - celloffM[cell_begin_ + (lay << 4)]) == 0){
-					lay++;
-				}
-				depth[idx] = lay;
-
-
-				int celloff = celloffM[cell_begin_ + (lay << 4)];
-
-				int offset_in_cell = offset_in_cell_[idx];
-				int remain_nump = celloffM[cell_begin_ + (lay << 4) + ((max + 1) << 2)] - celloff - offset_in_cell;
-
-				int num_read = remain_nump > readDataSize ? readDataSize : remain_nump;
-				if (num_read > bj) {
-					int read_idx = celloff + offset_in_cell + bj;
-					my_pos = __ldg(&buff_list.position_d[read_idx]);
-					my_ev  = __ldg(&buff_list.evaluated_velocity[read_idx]);
-				}
-				if (remain_nump > readDataSize) offset_in_cell_[idx] += readDataSize;
-				else {
-					depth[idx]++;
-					if (depth[idx] < lgth){
-						while ((celloffM[cell_begin_ + (depth[idx] << 4) + ((max + 1) << 2)] - celloffM[cell_begin_ + (depth[idx] << 4)]) == 0){
-							depth[idx]++;
-							if (depth[idx] >= lgth) break;
-						}
-					}
-					if (depth[idx] >= lgth){
-						int next_cell_idx = curr_cell_index + 1;
-						while (next_cell_idx < 9 + bi * 9 * noCombine) {
-							if (0 != cell_nump_[next_cell_idx]) break;
-							++next_cell_idx;
-						}
-						current_cell_index_[idx] = next_cell_idx;
-						depth[idx] = 0;
-					}
-					offset_in_cell_[idx] = 0;
-				}
-				return num_read;
-			}
-		}
-    }
-
-private:
-    int cell_offset_[9 * rate];
-    int cell_nump_[9 * rate];
-	int cell_begin[9 * rate];
-	uint offset_in_cell_[kNumSharedData * rate];
-    char current_cell_index_[kNumSharedData * rate];
-	char depth[kNumSharedData * rate];
-	char length[rate];
-	char iminz[rate];
-	char imaxz[rate];
-};
-
-
-
-
-
-
-
-
-
-
-
-//sf struct PCISPH over-------------------------
 class CfkSharedData128
 {
 public:

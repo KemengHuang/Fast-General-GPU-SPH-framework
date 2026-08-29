@@ -27,9 +27,9 @@ the `Arrangement` shutdown leak; the `knFindHybridModeMiddleValue` write race.
 ### Kernel optimizations (behavior-preserving)
 - **`__launch_bounds__(64, 10)` restored** on both hybrid kernels — validated spill-free via
   `cuobjdump -res-usage`: density 40 regs, force 57 regs, 0 stack/local.
-- **Dead `isSame == 1` branches removed** from the live kernels (`isSame` is hard-wired to 0);
-  the original shared-memory path remains reachable via `DENSITY_SMS_USE_REGISTER_PATH 0` /
-  `FORCE_SMS_USE_REGISTER_PATH 0`.
+- **Dead `isSame == 1` branches removed** from the live kernels. The register implementation is
+  selected by default; configure with `-DGSPH_USE_REGISTER_SMS=OFF` for the legacy shared-memory
+  A/B build.
 - **`inv_cell_size` precomputed** (`SystemParameter::inv_cell_size`, `Arrangement::inv_cell_size_`);
   `ParticlePos2CellPos*` now multiply instead of dividing per thread. All call sites updated.
 - **Redundant `cell_offset[cell_id]` / `cell_num[cell_id]` loads hoisted** into registers in the
@@ -114,14 +114,36 @@ stays busy draining the launch queue during the sync, so the sync is nearly free
 device-side capability remains available via the macro; on other scenes or weaker CPUs it may
 still win.
 
+## Register/shared final A/B and cleanup (2026-08-29)
+
+RTX 5090, CUDA 13.2, native `sm_120`, default 3,944,312-particle scene, three interleaved
+200-frame runs:
+
+| Variant | Mean frame | Relative throughput |
+|---|---:|---:|
+| Legacy shared iterator (`GSPH_USE_REGISTER_SMS=OFF`) | 23.009 ms | 1.000× |
+| Register iterator (`ON`, default) | 21.112 ms | 1.090× |
+
+Both builds were spill-free. The register build used 39 registers for density and 72 for force;
+Compute Sanitizer reported zero errors. A diagnostic build measured about 5,172 candidate pairs
+but only 1,174 interacting neighbors per particle/frame, explaining why storage-only changes
+cannot plausibly produce a 1.5× whole-frame speedup without changing the neighbor algorithm.
+
+The production path is now fixed at 32 particles per task and 64 threads per block. Density and
+force share `SmsRegisterTaskIterator`; the duplicated legacy register iterator classes and the
+obsolete `apply_reg.py`/`.register_attempt` artifacts were removed.
+
 ## Reproduce
 
 ```bash
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64 \
+  -DCMAKE_CUDA_ARCHITECTURES=120 \
   -DCMAKE_TOOLCHAIN_FILE=D:/vcpkg/scripts/buildsystems/vcpkg.cmake
 cmake --build build --config Release
 build/Release/gsph.exe --benchmark 200
 ```
+
+For the shared-memory A/B build, add `-DGSPH_USE_REGISTER_SMS=OFF` at configure time.
 
 Register check after kernel changes:
 

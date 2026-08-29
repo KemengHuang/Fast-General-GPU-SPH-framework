@@ -58,10 +58,12 @@ __global__ //__launch_bounds__(128, kDefulatMinBlocksSMS)
 void knComputeOtherForceHybrid128(ParticleIdxRange range, ParticleBufferList buff_list, int *cell_offset, int *cell_num, BlockTask *block_task, int bt_offset);
 __global__ //__launch_bounds__(128, kDefulatMinBlocksSMS)
 void knComputeOtherForceHybrid128n(ParticleIdxRange range, ParticleBufferList buff_list_n, int *cindex, int *cell_offset, int *cell_num, BlockTask *block_task, int bt_offset);
-void launchForceHybrid128n(int number_blocks, bool sms_only,
-    int *cell_offset_M, ParticleIdxRange range, ParticleBufferList buff_list,
-    int *cindex, int *cell_offset, int *cell_num, BlockTask *block_task,
-    const int *d_num_block, const int *d_middle);
+void launchForceHybridKernel(
+    int block_count, bool sms_only, int *micro_cell_offsets,
+    ParticleIdxRange tra_range, ParticleBufferList buffers,
+    int *compact_indices, int *cell_offsets, int *cell_particle_counts,
+    const BlockTask *block_tasks, const int *device_sms_task_count,
+    const int *device_middle);
 
 }
 

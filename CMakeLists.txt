@@ -5,6 +5,12 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type" FORCE)
 endif()
 
+# Set the project default before CUDA compiler detection. Command-line values
+# such as -DCMAKE_CUDA_ARCHITECTURES=120 still take precedence.
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+    set(CMAKE_CUDA_ARCHITECTURES "89" CACHE STRING "CUDA architectures")
+endif()
+
 project(Hybrid_Fluid_Simulation LANGUAGES CXX CUDA)
 
 # Generate compile_commands.json
@@ -17,14 +23,10 @@ find_package(OpenGL REQUIRED)
 find_package(jsoncpp CONFIG REQUIRED)
 find_package(CUDAToolkit REQUIRED)
 
-# CUDA architectures (adjust as needed).
-# The current workstation has an RTX 4090 (sm_89); native code gives the best performance.
-set(CMAKE_CUDA_ARCHITECTURES "89" CACHE STRING "CUDA architectures")
-
 # Executable
 add_executable(gsph)
 
-# Sources – recursively collect all implementation and header files under src/ and third_party/.
+# Recursively collect implementation and header files under src/ and third_party/.
 file(GLOB_RECURSE gsph_SOURCES CONFIGURE_DEPENDS
     "src/*.cpp"
     "src/*.cu"
@@ -34,6 +36,14 @@ file(GLOB_RECURSE gsph_SOURCES CONFIGURE_DEPENDS
     "third_party/lodepng/*.h"
 )
 target_sources(gsph PRIVATE ${gsph_SOURCES})
+
+option(GSPH_USE_REGISTER_SMS
+    "Use register-resident iterator state for the SMS density/force path" ON)
+if(GSPH_USE_REGISTER_SMS)
+    target_compile_definitions(gsph PRIVATE GSPH_USE_REGISTER_SMS=1)
+else()
+    target_compile_definitions(gsph PRIVATE GSPH_USE_REGISTER_SMS=0)
+endif()
 
 # Include directories
 #   src/            project headers

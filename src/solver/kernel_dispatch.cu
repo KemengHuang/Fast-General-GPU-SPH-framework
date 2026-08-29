@@ -164,7 +164,7 @@ void computeOtherForceHybrid128(ParticleIdxRange range, ParticleBufferList buff_
     int bt_offset = 0;
     int number_blocks = ceil_int(num_block, 2);
     if (total_thread > 0){
-        bt_offset = ceil_int(total_thread, SMS_BLOCK_THREADS);
+        bt_offset = ceil_int(total_thread, kSmsBlockThreads);
         number_blocks += bt_offset;
     }
     if (number_blocks <= 0) return;
@@ -176,49 +176,67 @@ void computeOtherForceHybrid128(ParticleIdxRange range, ParticleBufferList buff_
     knComputeOtherForceHybrid128 << <number_blocks, num_thread >> >(range, buff_list, cell_offset, cell_number, block_task, bt_offset);
 
 }
-void computeDensityHybrid128n(int *cell_offset_M, ParticleIdxRange range, ParticleBufferList buff_list_n, int* cindex, int *cell_offset, int *cell_num, BlockTask *block_task, int num_block, const int *d_num_block, const int *d_middle, int sms_task_bound){
 
-    int total_thread = range.end - range.begin;
-    int num_thread = SMS_BLOCK_THREADS;
+namespace {
+
+struct HybridLaunchConfig {
+    int block_count;
+    bool sms_only;
+};
+
+HybridLaunchConfig makeHybridLaunchConfig(int tra_particle_count,
+                                          int sms_task_count,
+                                          int sms_task_bound)
+{
+    const int tra_block_count = ceil_int(
+        tra_particle_count, kSmsBlockThreads);
 #if HYBRID_DEVICE_GRID_SIZING
-    // Over-provision the grid; the kernel reads the TRA/SMS split and the SMS task
-    // count from device memory and excess blocks exit immediately.
-    (void)num_block;
-    int number_blocks = ceil_int(total_thread, num_thread) + ceil_int(sms_task_bound, SMS_TASKS_PER_BLOCK);
-    if (number_blocks <= 0) return;
-	launchDensityHybrid128n(number_blocks, false, cell_offset_M, range, buff_list_n, cindex, cell_offset, cell_num, block_task, d_num_block, d_middle);
+    (void)sms_task_count;
+    return {tra_block_count + ceil_int(sms_task_bound, kSmsTasksPerBlock),
+            false};
 #else
-    int bt_offset = 0;
-    int number_blocks = ceil_int(num_block, SMS_TASKS_PER_BLOCK);
-    if (total_thread > 0){
-        bt_offset = ceil_int(total_thread, SMS_BLOCK_THREADS);
-        number_blocks += bt_offset;
-    }
-    if (number_blocks <= 0) return;
-	launchDensityHybrid128n(number_blocks, total_thread == 0, cell_offset_M, range, buff_list_n, cindex, cell_offset, cell_num, block_task, d_num_block, d_middle);
+    (void)sms_task_bound;
+    return {tra_block_count + ceil_int(sms_task_count, kSmsTasksPerBlock),
+            tra_particle_count == 0};
 #endif
 }
 
-void computeForceHybrid128n(int *cell_offset_M, ParticleIdxRange range, ParticleBufferList buff_list_n, int* cindex, int *cell_offset, int *cell_num, BlockTask *block_task, int num_block, const int *d_num_block, const int *d_middle, int sms_task_bound){
-    int total_thread = range.end - range.begin;
-    int num_thread = SMS_BLOCK_THREADS;
-#if HYBRID_DEVICE_GRID_SIZING
-    // Over-provision the grid; the kernel reads the TRA/SMS split and the SMS task
-    // count from device memory and excess blocks exit immediately.
-    (void)num_block;
-    int number_blocks = ceil_int(total_thread, num_thread) + ceil_int(sms_task_bound, SMS_TASKS_PER_BLOCK);
-    if (number_blocks <= 0) return;
-	launchForceHybrid128n(number_blocks, false, cell_offset_M, range, buff_list_n, cindex, cell_offset, cell_num, block_task, d_num_block, d_middle);
-#else
-    int bt_offset = 0;
-    int number_blocks = ceil_int(num_block, SMS_TASKS_PER_BLOCK);
-    if (total_thread > 0){
-        bt_offset = ceil_int(total_thread, SMS_BLOCK_THREADS);
-        number_blocks += bt_offset;
-    }
-    if (number_blocks <= 0) return;
-	launchForceHybrid128n(number_blocks, total_thread == 0, cell_offset_M,range, buff_list_n, cindex, cell_offset, cell_num, block_task, d_num_block, d_middle);
-#endif
+} // namespace
+
+void computeDensityHybrid(
+    int *micro_cell_offsets, ParticleIdxRange tra_range,
+    ParticleBufferList buffers, int *compact_indices, int *cell_offsets,
+    int *cell_particle_counts, const BlockTask *block_tasks, int sms_task_count,
+    const int *device_sms_task_count, const int *device_middle,
+    int sms_task_upper_bound)
+{
+    const HybridLaunchConfig config = makeHybridLaunchConfig(
+        tra_range.end - tra_range.begin, sms_task_count,
+        sms_task_upper_bound);
+    if (config.block_count <= 0) return;
+
+    launchDensityHybridKernel(
+        config.block_count, config.sms_only, micro_cell_offsets, tra_range,
+        buffers, compact_indices, cell_offsets, cell_particle_counts,
+        block_tasks, device_sms_task_count, device_middle);
+}
+
+void computeForceHybrid(
+    int *micro_cell_offsets, ParticleIdxRange tra_range,
+    ParticleBufferList buffers, int *compact_indices, int *cell_offsets,
+    int *cell_particle_counts, const BlockTask *block_tasks, int sms_task_count,
+    const int *device_sms_task_count, const int *device_middle,
+    int sms_task_upper_bound)
+{
+    const HybridLaunchConfig config = makeHybridLaunchConfig(
+        tra_range.end - tra_range.begin, sms_task_count,
+        sms_task_upper_bound);
+    if (config.block_count <= 0) return;
+
+    launchForceHybridKernel(
+        config.block_count, config.sms_only, micro_cell_offsets, tra_range,
+        buffers, compact_indices, cell_offsets, cell_particle_counts,
+        block_tasks, device_sms_task_count, device_middle);
 }
 
 void computeOtherForceHybrid128n(ParticleIdxRange range, ParticleBufferList buff_list_n, int* cindex, int *cell_offset, int *cell_num, BlockTask *block_task, int num_block){

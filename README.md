@@ -46,6 +46,9 @@ Visual Studio (multi-config):
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 ```
 
+The repository default is `sm_89`. Override it for another GPU, for example
+`-DCMAKE_CUDA_ARCHITECTURES=120` on RTX 5090.
+
 If the dependencies are not on the default search path, point CMake at vcpkg:
 
 ```bash
@@ -85,8 +88,15 @@ performance checks):
 gsph --benchmark 200
 ```
 
-This prints wall-clock FPS plus per-stage timings (grid arrange / density / force) collected
-from CUDA events. `--headless N` is an alias.
+This prints wall-clock FPS, the TRA/SMS split, a deterministic state checksum, and per-stage
+timings (grid arrange / density / force). `--headless N` is an alias.
+
+The optimized register SMS path is enabled by default. Configure an equivalent legacy shared
+path build for A/B testing with:
+
+```bash
+cmake -S . -B build-shared -DGSPH_USE_REGISTER_SMS=OFF
+```
 
 ### Controls
 
@@ -127,6 +137,10 @@ Reference numbers for the default scene (~3.94M particles), measured with
 `gsph --benchmark 200` on an RTX 4090 / CUDA 12.4:
 
 - **~35 FPS** (28.6 ms/frame): ~1.2 ms grid arrange, ~9.5 ms density, ~20 ms force
+
+On RTX 5090 / CUDA 13.2 / native `sm_120`, three interleaved 200-frame runs measured
+23.009 ms/frame for the shared path and 21.112 ms/frame for the register path
+(~8.99% throughput improvement).
 
 See `agent_docs/optimization_report.md` for the measured optimization history, including
 evaluated-and-rejected experiments (device-side grid sizing, neighbor-batch prefetching).

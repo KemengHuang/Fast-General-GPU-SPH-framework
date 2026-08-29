@@ -21,48 +21,43 @@ class Arrangement
 public:
     Arrangement(ParticleBufferObject &buff_list,
                 ParticleBufferObject &buff_temp,
-
                 unsigned int nump,
-				unsigned int nump_capacity,
+                unsigned int nump_capacity,
                 float inv_cell_size,
                 ushort3 grid_size);
 
     ~Arrangement();
 
-    // return middle value of 2 parallel framework
+    // Live per-frame arrangement path.
+    void arrangeHybridFrame();
+    int getSmsTaskCount() const;
+    const BlockTask *getSmsTasks() const;
+
+    int *getDevCellOffset() { return d_cell_offset_; }
+    int *getDevCellOffsetM() { return d_cell_offset_M; }
+    int *getDevCellIndex() { return d_index_; }
+    int *getDevCellNumP() { return d_cell_nump_; }
+
+    const int *getDeviceSmsTaskCount() const { return d_num_cta_; }
+    const int *getDeviceTraParticleCount() const { return d_middle_value_; }
+    int getTraParticleCount() const { return middle_value_; }
+    unsigned int getNumC() const { return numc_; }
+
+    void resetNumParticle(unsigned int nump);
+
+    // Legacy arrangement entry points retained for inactive solver variants.
     int arrangeTRAMode();
     void arrangeSMSMode();
-	int arrangeHybridMode();
+    int arrangeHybridMode();
     int arrangeHybridMode9();
     void test();
 
     void sortParticles();
     void assignTasksFixedCTA();
 
-    int* getDevCellStartIdx();
-    int* getDevCellEndIdx();
-    int getNumBlockSMSMode();
-    BlockTask *getBlockTasks();
-
-	void resetNumParticle(unsigned int nump);
-
-    
-    int* getDevOffsetData() { return d_cell_offset_data; }
-    int* getDevCellOffset() { return d_cell_offset_; }
-	int* getDevCellOffsetM() { return d_cell_offset_M; }
-    int* getDevCellIndex() { return d_index_; }
-
-    int* getDevCellNumP() { return d_cell_nump_; }
-
-    // Device scalars consumed by the hybrid physics kernels (device-side grid sizing).
-    const int* getDevNumCTA() { return d_num_cta_; }
-    const int* getDevMiddleValue() { return d_middle_value_; }
-
-    // Host-side copies (only valid on the host-synced path, HYBRID_DEVICE_GRID_SIZING=0).
-    int getMiddleValue() { return middle_value_; }
-
-    unsigned int getNumC() { return numc_; }
-
+    int *getDevCellStartIdx();
+    int *getDevCellEndIdx();
+    int *getDevOffsetData() { return d_cell_offset_data; }
 
     void CountingSortCUDA();
     void CountingSort_O();
@@ -71,9 +66,9 @@ public:
     void CountingSortCUDA_Two9();
     void countNum();
 
-	void CountingSort_O_M();
-	void CountingSortCUDA_Two9_M();
-	void arrangeHybridMode9M();
+    void CountingSort_O_M();
+    void CountingSortCUDA_Two9_M();
+
 private:
     void calculateHash();
     void calculateHashWithBlockReq();
@@ -86,20 +81,17 @@ private:
     void insertParticles();
     void arrangeBlockTasks();
 
-	
-
     void CSInsertParticles();
     void CSCountingSortFull();
-	void arrangeBlockTasksFixedM(int *hash, int *celloff, int *cellnum,
-        BlockTask* d_task_array, int* d_cta_reqs,
-        int* d_task_array_offset, int cta_size);
-    void arrangeBlockTasksFixed(BlockTask* d_task_array, int* d_cta_reqs, int* d_task_array_offset, int cta_size);
+    void arrangeIndependentSmsTasks(
+        const int *hash, const int *cell_offsets,
+        const int *cell_particle_counts, BlockTask *tasks,
+        const int *cell_task_counts, const int *cell_task_offsets);
+    void arrangeBlockTasksFixed(BlockTask* d_task_array, int* d_cta_reqs,
+                                int* d_task_array_offset, int cta_size);
     void arrangeBlockTasksFloat();
 
     void CSCalculateRequiredCTAsFixed(int *cat_offset, int* d_cta_reqs, int cta_size);
-
-
-  
 
     ParticleBufferObject &buff_list_; // particle device buffer
     ParticleBufferObject &buff_temp_; // particle device buffer for replacement 

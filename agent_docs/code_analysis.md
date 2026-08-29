@@ -13,9 +13,9 @@ files. Target: Windows / VS2022 / CUDA 12.x / RTX 4090 (sm_89).
 
 | Stage | What runs |
 |---|---|
-| Arrange | `Arrangement::arrangeHybridMode9M()` (`src/grid/sph_arrangement.cu`): 38 MB micro-cell table memset → atomic histogram → CUB exclusive scan over ~10.08M ints → physical particle reorder (~380 MB traffic) → per-cell info → `knCalculateBlockRequirementHybridMode` → second histogram + CUB inclusive scan + compaction index → CUB scan of block requests → `knArrangeTasksFixedM` → 4-byte D2H + `cudaStreamSynchronize(0)` → `judgeTask` |
-| Density | `kncomputeDensityHybrid128n` — one fused launch; TRA branch (`blockIdx.x < bt_offset`, one thread per sparse particle via `cindex` gather) / SMS branch (64-thread block = 2 warps, each warp takes one ≤32-particle `BlockTask` of a dense cell; register-load + warp-local `__shared__ float4[64]` exchange) |
-| Force | `kncomputeForceHybrid128n` — same split structure |
+| Arrange | `Arrangement::arrangeHybridFrame()` (`src/grid/sph_arrangement.cu`): micro-cell histogram → CUB scan → physical particle reorder → per-cell info → task requirement model → compaction index → task-offset scan → `knArrangeIndependentSmsTasks` → one scalar D2H/sync → `padIndependentSmsTasks` |
+| Density | `computeDensityHybridKernel` — one fused launch; TRA branch gathers sparse particles through `compact_indices`, while the SMS branch runs two independent 32-particle warps per 64-thread block using `SmsRegisterTaskIterator` |
+| Force | `computeForceHybridKernel` — same split and task structure; neighbor velocity is read only after the distance test passes |
 | Integrate | `knIntegrateVelocityE` |
 | Render | `knCopyToVBOs` writes `final_position`/`color` directly into CUDA-registered GL VBOs (no host round-trip) |
 
@@ -36,14 +36,13 @@ is **dead at runtime** (~40% of the source tree).
   staging calls commented out) — now marked with `WARNING` comments; do not launch them.
 - `pcisph_kernels.cu` is 271 lines of empty stubs; the `predictionCorrectionStep*` family
   hardcodes `max_predicted_density = 1000.0f` so its convergence test degenerates.
-- `kernel_common.cuh` (~3000 lines) contains ~1700 lines of dead shared-memory helper classes;
-  the live register-path classes (`SimDenRegData128`, `SimForRegData128`) duplicate ~100 lines of
-  cell-range logic verbatim per class.
+- `kernel_common.cuh` still contains many legacy shared-memory helper classes; the live register
+  path uses the single `SmsRegisterTaskIterator` implementation for both density and force.
 
 ### `src/grid/sph_arrangement.cu` — sorting / task generation
 - ~1600 lines with ≥8 dead arrange variants and large commented debug dumps.
-- `judgeTask` pads an odd task count by fabricating a duplicate task at `block_tasks[numb]`
-  (requires the `numc*10` capacity — an undocumented ≤320 particles/cell assumption).
+- The live SMS path keeps adjacent warp tasks independent. `padIndependentSmsTasks` only creates
+  one inactive descriptor for an odd tail, and the task buffer uses an exact safe upper bound.
 - `gpu_model.cu` heuristic `(nump_self + 27) >> 5` under-allocates SMS tasks for cells with
   33–36 particles (tail particles keep stale density for that frame) — an upstream heuristic
   quirk, not a regression from this work.
@@ -90,5 +89,3 @@ is **dead at runtime** (~40% of the source tree).
   grid-stride mismatch (`iso_radius/4` vs `kernel/4`) mis-scales meshes; keep out of frame loop.
 - `scan.cu` legacy recursive prescan is dead on the live path (CUB replaced it); float/int
   variants share `g_numEltsAllocated`, so using both trips an assert.
-- `apply_reg.py` (repo root) is a leftover experiment script pointing at a different checkout;
-  `src/solver/density_kernels.cu.register_attempt` is its stray output. Safe to delete both.

@@ -24,38 +24,21 @@
 #define HYBRID_DEVICE_GRID_SIZING 0
 #endif
 
-// The live SMS kernels treat the two warps independently (isSame is fixed to
-// zero), so keep each 32-particle task's original micro-cell bounds.  The old
-// pairing logic widened the first task to cover both warps and increased the
-// number of rejected neighbor pairs.
-#ifndef SMS_PAIR_TASK_COALESCING
-#define SMS_PAIR_TASK_COALESCING 0
+#ifndef GSPH_USE_REGISTER_SMS
+#define GSPH_USE_REGISTER_SMS 1
 #endif
-
-// Number of self particles handled by one register-path cooperative group.
-// Candidate builds may set this to 16 or 8; the production/shared baseline is
-// 32.  A 64-thread block always packs an integral number of groups.
-#ifndef SMS_TASK_PARTICLES
-#define SMS_TASK_PARTICLES 32
-#endif
-
-#ifndef SMS_BLOCK_THREADS
-#define SMS_BLOCK_THREADS 64
-#endif
-
-#if SMS_TASK_PARTICLES != 8 && SMS_TASK_PARTICLES != 16 && SMS_TASK_PARTICLES != 32
-#error "SMS_TASK_PARTICLES must be 8, 16, or 32"
-#endif
-
-#if SMS_BLOCK_THREADS != 64 && SMS_BLOCK_THREADS != 128 && SMS_BLOCK_THREADS != 256
-#error "SMS_BLOCK_THREADS must be 64, 128, or 256"
-#endif
-
-#define SMS_TASKS_PER_BLOCK (SMS_BLOCK_THREADS / SMS_TASK_PARTICLES)
-#define SMS_MIN_BLOCKS_PER_SM (640 / SMS_BLOCK_THREADS)
 
 namespace sph
 {
+
+    // Validated production layout: one independent 32-particle task per warp,
+    // with two warps in each SMS block. Pairing adjacent tasks widens their
+    // spatial bounds and was measurably slower on the benchmark scene.
+    constexpr int kSmsTaskParticles = 32;
+    constexpr int kSmsBlockThreads = 64;
+    constexpr int kSmsTasksPerBlock = kSmsBlockThreads / kSmsTaskParticles;
+    constexpr int kSmsMinBlocksPerSm = 10;
+    constexpr unsigned int kFullWarpMask = 0xffffffffu;
 
 	const int kInvalidCellIdx = 0xffffffff;
 
@@ -80,9 +63,9 @@ namespace sph
 	__device__
 		inline int CellPos2CellIdx(const ushort3 &cell_pos, const ushort3 &grid_size)
 	{
-			if (cell_pos.x >= grid_size.x || cell_pos.x < 0 ||
-				cell_pos.y >= grid_size.y || cell_pos.y < 0 ||
-				cell_pos.z >= grid_size.z || cell_pos.z < 0)
+			if (cell_pos.x >= grid_size.x ||
+				cell_pos.y >= grid_size.y ||
+				cell_pos.z >= grid_size.z)
 				return kInvalidCellIdx;
 			return cell_pos.x + grid_size.x * (cell_pos.y + grid_size.y * cell_pos.z);
 		}
@@ -96,9 +79,9 @@ namespace sph
 	__device__
 		inline int CellPos2CellIdxM(const ushort3 &cell_pos, const ushort3 &grid_size)
 	{
-			if (cell_pos.x >= (grid_size.x << 2) || cell_pos.x < 0 ||
-				cell_pos.y >= (grid_size.y << 2) || cell_pos.y < 0 ||
-				cell_pos.z >= (grid_size.z << 2) || cell_pos.z < 0)
+			if (cell_pos.x >= (grid_size.x << 2) ||
+				cell_pos.y >= (grid_size.y << 2) ||
+				cell_pos.z >= (grid_size.z << 2))
 				return kInvalidCellIdx;
 
 			int x = cell_pos.x & 0x03;

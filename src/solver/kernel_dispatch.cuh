@@ -63,12 +63,20 @@ void computeForceTRA(ParticleBufferList buff_list, ParticleIdxRange range, int *
 void computeDensitySMS(ParticleBufferList buff_list, int *cell_offset, int *cell_num, BlockTask *block_task, int num_block);
 
 void computeDensitySMS64(ParticleBufferList buff_list, int *cell_offset, int *cell_num, BlockTask *block_task, int num_block);
-void computeDensityHybrid128n(int *cell_offset_M, ParticleIdxRange range, ParticleBufferList buff_list_n, int* cindex, int *cell_offset, int *cell_num, BlockTask *block_task, int num_block, const int *d_num_block, const int *d_middle, int sms_task_bound);
 
-void computeForceHybrid128n(int *cell_offset_M, ParticleIdxRange range, ParticleBufferList buff_list_n, int* cindex, int *cell_offset, int *cell_num, BlockTask *block_task, int num_block, const int *d_num_block, const int *d_middle, int sms_task_bound);
-//void computeDensityHybrid128n(ParticleIdxRange range, ParticleBufferList buff_list_n, int* cindex, int *cell_offset, int *cell_num, BlockTask *block_task, int num_block);
+void computeDensityHybrid(
+    int *micro_cell_offsets, ParticleIdxRange tra_range,
+    ParticleBufferList buffers, int *compact_indices, int *cell_offsets,
+    int *cell_particle_counts, const BlockTask *block_tasks, int sms_task_count,
+    const int *device_sms_task_count, const int *device_middle,
+    int sms_task_upper_bound);
 
-//void computeForceHybrid128n(ParticleIdxRange range, ParticleBufferList buff_list_n, int* cindex, int *cell_offset, int *cell_num, BlockTask *block_task, int num_block);
+void computeForceHybrid(
+    int *micro_cell_offsets, ParticleIdxRange tra_range,
+    ParticleBufferList buffers, int *compact_indices, int *cell_offsets,
+    int *cell_particle_counts, const BlockTask *block_tasks, int sms_task_count,
+    const int *device_sms_task_count, const int *device_middle,
+    int sms_task_upper_bound);
 
 void computeForceSMS(ParticleBufferList buff_list, int *cell_offset, int *cell_num, BlockTask *block_task, int num_block);
 

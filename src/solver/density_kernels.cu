@@ -2,14 +2,9 @@
 
 #include "solver/kernel_common.cuh"
 
-// Switch for the density SMS different-cell path:
-// 0 = original shared-memory path for both same-cell and different-cell tasks
-// 1 = register-load + warp-local shared exchange for different-cell tasks,
-//     shared-memory path kept for same-cell tasks (dominant case)
-#ifndef DENSITY_SMS_USE_REGISTER_PATH
-#define DENSITY_SMS_USE_REGISTER_PATH 1
-#endif
-
+// Select the live SMS implementation:
+// 0 = legacy shared-memory iterator and neighbor staging
+// 1 = register iterator state with warp-local neighbor staging
 namespace sph {
 __device__
 inline void knComputeCellDensitySMS64(const int& isSame, SimDenSharedData128 *sdata, CDAPData *self_data, int read_num)
@@ -280,15 +275,16 @@ void knComputeMixDensityTRA(ParticleBufferList buff_list, int *cell_offset, int 
 
 }
 
-#if DENSITY_SMS_USE_REGISTER_PATH
+#if GSPH_USE_REGISTER_SMS
 __device__ __forceinline__
-void knComputeCellDensityReg64(float4 *shared_pos, int warp_base,
-                               CDAPData *self_data, int read_num)
+void accumulateDensityRegisterBatch(const float4 *neighbor_positions,
+                                    int warp_base, CDAPData *self_data,
+                                    int neighbor_count)
 {
     #pragma unroll 4
-    for (int src = 0; src < read_num; ++src)
+    for (int src = 0; src < neighbor_count; ++src)
     {
-        float4 neighbor_position = shared_pos[warp_base + src];
+        float4 neighbor_position = neighbor_positions[warp_base + src];
         float dis_2 = distance_square(self_data->pos, neighbor_position);
         if (kDevSysPara.kernel_2 < dis_2 || kFloatSmall > dis_2)
             continue;
@@ -298,232 +294,207 @@ void knComputeCellDensityReg64(float4 *shared_pos, int warp_base,
 }
 #endif
 
-template <bool SmsOnly>
-__global__ __launch_bounds__(SMS_BLOCK_THREADS, SMS_MIN_BLOCKS_PER_SM)
-void kncomputeDensityHybrid128nImpl(int *cell_offset_M, ParticleIdxRange range, ParticleBufferList buff_list, int *cindex, int *cell_offset, int *cell_num, BlockTask *block_task, const int *d_num_block, const int *d_middle)
+template <bool kSmsOnly>
+__global__ __launch_bounds__(kSmsBlockThreads, kSmsMinBlocksPerSm)
+void computeDensityHybridKernel(
+    int *micro_cell_offsets, ParticleIdxRange tra_range,
+    ParticleBufferList buffers, int *compact_indices, int *cell_offsets,
+    int *cell_particle_counts, const BlockTask *block_tasks,
+    const int *device_sms_task_count, const int *device_middle)
 {
-    int bt_offset = 0;
-    if constexpr (!SmsOnly)
+    int tra_block_count = 0;
+    if constexpr (!kSmsOnly)
     {
         // Device-side TRA/SMS split: the host over-provisions the grid and excess
         // blocks exit immediately, so the frame needs no host readback/synchronization.
-        int middle = __ldg(d_middle);
-        if (middle < 0 || middle > range.end) middle = range.end;
-        bt_offset = ceil_int(middle - range.begin, SMS_BLOCK_THREADS);
+        int tra_particle_count = __ldg(device_middle);
+        if (tra_particle_count < 0 || tra_particle_count > tra_range.end)
+            tra_particle_count = tra_range.end;
+        tra_block_count = ceil_int(
+            tra_particle_count - tra_range.begin, kSmsBlockThreads);
 
-        if (blockIdx.x < bt_offset){
-        int self_idx = threadIdx.x + __umul24(blockIdx.x, blockDim.x) + range.begin;
-        if (self_idx >= middle) return;
-        self_idx = __ldg(&cindex[self_idx]);
+        if (blockIdx.x < tra_block_count)
+        {
+            int sorted_index = threadIdx.x
+                + __umul24(blockIdx.x, blockDim.x) + tra_range.begin;
+            if (sorted_index >= tra_particle_count) return;
 
-        register CDAPData self_data;
-        self_data.pos = __ldg(&buff_list.position_d[self_idx]);
-  //      self_data.pos =buff_list.position_d[self_idx];
-        self_data.pos.w = 0;
-        ushort3 cell_posc = ParticlePos2CellPosM(self_data.pos, kDevSysPara.inv_cell_size);
+            const int self_idx = __ldg(&compact_indices[sorted_index]);
+            CDAPData self_data;
+            self_data.pos = __ldg(&buffers.position_d[self_idx]);
+            self_data.pos.w = 0;
 
-		ushort3 cell_pos = calCI(cell_posc);
-		int xxx = (cell_posc.x) & 0x03;
+            const ushort3 micro_cell = ParticlePos2CellPosM(
+                self_data.pos, kDevSysPara.inv_cell_size);
+            const ushort3 coarse_cell = calCI(micro_cell);
+            const int local_micro_x = micro_cell.x & 3;
 
-        register ushort3 grid_size = kDevSysPara.grid_size;
-        register int cell_offset_;
-        register int cell_nump_;
-
-        for (int i = 0; i < 9; i++){
-            ushort3 neighbor_pos = cell_pos + make_ushort3(-1, i % 3 - 1, i / 3 % 3 - 1);
-            if (neighbor_pos.y < 0 || neighbor_pos.y >= grid_size.y ||
-                neighbor_pos.z < 0 || neighbor_pos.z >= grid_size.z) {
-                continue;
+            for (int neighbor_row = 0; neighbor_row < 9; ++neighbor_row)
+            {
+                const ParticleIdxRange neighbor_range =
+                    findTraNeighborParticleRange(
+                        micro_cell_offsets, cell_offsets,
+                        cell_particle_counts, coarse_cell,
+                        local_micro_x, neighbor_row % 3 - 1,
+                        neighbor_row / 3 - 1, kDevSysPara.grid_size);
+                knComputeCellDensityTRA9(
+                    buffers, &self_data, neighbor_range.begin,
+                    neighbor_range.end - neighbor_range.begin);
             }
-            else {
-                int nid_left, nid_mid, nid_right;
-                nid_left = CellPos2CellIdx(neighbor_pos, grid_size);
-                ++neighbor_pos.x;
-                nid_mid = CellPos2CellIdx(neighbor_pos, grid_size);
-                ++neighbor_pos.x;
-                nid_right = CellPos2CellIdx(neighbor_pos, grid_size);
-              /*  cell_offset_ =
-                    kInvalidCellIdx == nid_left ? cell_offset[nid_mid] : cell_offset[nid_left];
-                cell_nump_ = cell_num[nid_mid];
-                if (kInvalidCellIdx != nid_left) cell_nump_ += cell_num[nid_left];
-                if (kInvalidCellIdx != nid_right) cell_nump_ += cell_num[nid_right];*/
 
+            self_data.pos.w *= kDevSysPara.mass * kDevSysPara.poly6_value;
+            self_data.pos.w += kDevSysPara.self_density;
+            buffers.position_d[self_idx].w =
+                __fdividef(1.0f, self_data.pos.w);
+            buffers.evaluated_velocity[self_idx].w =
+                (powf_7(__fdividef(
+                    self_data.pos.w, kDevSysPara.rest_density)) - 1)
+                * kDevSysPara.gas_constant;
 
-
-
-
-
-
-
-				cell_offset_ =
-					kInvalidCellIdx == nid_left ? __ldg(&cell_offset[nid_mid]) : __ldg(&cell_offset_M[(nid_left << 6) + (xxx << 4)]);
-				cell_nump_ = __ldg(&cell_num[nid_mid]);
-				if (kInvalidCellIdx != nid_left) cell_nump_ += __ldg(&cell_offset[nid_mid]) - __ldg(&cell_offset_M[(nid_left << 6) + (xxx << 4)]);
-				if (xxx == 3){
-					if (kInvalidCellIdx != nid_right) cell_nump_ += __ldg(&cell_num[nid_right]);
-				}
-				else{
-					if (kInvalidCellIdx != nid_right) cell_nump_ += __ldg(&cell_offset_M[(nid_right << 6) + ((xxx + 1) << 4)]) - __ldg(&cell_offset_M[(nid_right << 6)]);
-				}
-				//cell_nump_[kk] = my_cell_nump;
-
-
-
-
-
-
-
-
-                knComputeCellDensityTRA9(buff_list, &self_data, cell_offset_, cell_nump_);
-            }
-        }
-
-        /*        for (int z = -1; z <= 1; ++z)
-        {
-        for (int y = -1; y <= 1; ++y)
-        {
-        for (int x = -1; x <= 1; ++x)
-        {
-        ushort3 neigbor_cell_pos = cell_pos + make_ushort3(x, y, z);
-        knComputeCellDensityTRA(buff_list, &self_data, cell_offset, cell_num, neigbor_cell_pos);
-        }
-        }
-        }*/
-
-        self_data.pos.w *= kDevSysPara.mass * kDevSysPara.poly6_value;
-        self_data.pos.w += kDevSysPara.self_density;
-        buff_list.position_d[self_idx].w = __fdividef(1.0f, self_data.pos.w);  // position_d.w stores 1/density
-        buff_list.evaluated_velocity[self_idx].w = (powf_7(__fdividef(self_data.pos.w, kDevSysPara.rest_density)) - 1) * kDevSysPara.gas_constant;
-
-		float denv = (5000 - self_data.pos.w) / 6000;
-		buff_list.color[self_idx] = COLORA(1.0f*denv, 0.f, 1.0*denv, 1.0);
+            const float density_color = (5000 - self_data.pos.w) / 6000;
+            buffers.color[self_idx] =
+                COLORA(density_color, 0.0f, density_color, 1.0f);
             return;
         }
     }
     {
 
-        int t = blockIdx.x - bt_offset;
-        if (t * SMS_TASKS_PER_BLOCK >= __ldg(d_num_block)) return;  // over-provisioned SMS block (block-uniform exit)
-		int n = t * SMS_TASKS_PER_BLOCK + threadIdx.x / SMS_TASK_PARTICLES;
-        BlockTask bt = block_task[n];
-        int isSame = 0;// bt.isSame;
+        int sms_block_index = blockIdx.x - tra_block_count;
+        if (sms_block_index * kSmsTasksPerBlock >= __ldg(device_sms_task_count))
+            return;
+        int task_index = sms_block_index * kSmsTasksPerBlock
+            + (threadIdx.x >> 5);
+        const BlockTask task = block_tasks[task_index];
 
-        int cell_id = bt.cellid;
-		ushort3 cellpos = CellIdx2CellPos(cell_id, kDevSysPara.grid_size);
+        int cell_id = task.cellid;
+        ushort3 cell_pos = CellIdx2CellPos(cell_id, kDevSysPara.grid_size);
 
-        register int cell_off = __ldg(&cell_offset[cell_id]);
-        register int cell_np = __ldg(&cell_num[cell_id]);
-        register int self_idx = cell_off + bt.p_offset + threadIdx.x % SMS_TASK_PARTICLES;
+        int cell_begin = __ldg(&cell_offsets[cell_id]);
+        int cell_particle_count = __ldg(&cell_particle_counts[cell_id]);
+        int self_idx = cell_begin + task.p_offset
+            + (threadIdx.x & (kSmsTaskParticles - 1));
 
-        register int temp_cell_end = cell_off + cell_np;
-        bool active = (self_idx < temp_cell_end);
+        int cell_end = cell_begin + cell_particle_count;
+        const bool active = self_idx < cell_end;
 
-        register CDAPData data;
+        CDAPData self_data;
 
-#if DENSITY_SMS_USE_REGISTER_PATH
+#if GSPH_USE_REGISTER_SMS
         // Partial tasks still execute warp-uniform neighbor loops.  Give their
         // inactive lanes a valid duplicate self particle so the hot loop does
         // not need a per-batch activity branch and never reads uninitialized
         // register state.
-        const int safe_self_idx = active ? self_idx : temp_cell_end - 1;
-        data.pos = __ldg(&buff_list.position_d[safe_self_idx]);
-        data.pos.w = 0;
+        const int safe_self_idx = active ? self_idx : cell_end - 1;
+        self_data.pos = __ldg(&buffers.position_d[safe_self_idx]);
+        self_data.pos.w = 0;
 #else
-        if (active)   // initialize self data
+        if (active)
         {
-            data.pos = __ldg(&buff_list.position_d[self_idx]);
-            data.pos.w = 0;
+            self_data.pos = __ldg(&buffers.position_d[self_idx]);
+            self_data.pos.w = 0;
         }
 #endif
 
-#if DENSITY_SMS_USE_REGISTER_PATH
-        // Register-load + warp-local shared exchange for different-cell tasks.
-        // (The isSame==1 shared-memory variant was removed: isSame is hard-wired to 0.)
+#if GSPH_USE_REGISTER_SMS
+        // Each warp owns one independent task and exchanges neighbor data only
+        // within its 32 lanes.
         {
             // A warp whose p_offset is past the cell has no self-particles.
             // All threads still participate in initialize() because it uses
             // __syncthreads(), but the empty warp can skip the iteration loop.
-            bool warp_has_work = (bt.p_offset < cell_np);
+            const bool warp_has_work = task.p_offset < cell_particle_count;
 
-            __shared__ SimRegTaskIterator128 sdata;
-			int iterator_cell;
-			int iterator_offset;
-			int iterator_segment;
-			sdata.initialize(bt.xxi, bt.xxx, bt.yyi, bt.yyy, bt.zzi, bt.zzz,
-				cell_offset_M, cellpos, kDevSysPara.grid_size,
-				iterator_cell, iterator_offset, iterator_segment);
-            __shared__ float4 shared_pos[SMS_BLOCK_THREADS];
+            __shared__ SmsRegisterTaskIterator neighbor_iterator;
+            int iterator_cell;
+            int iterator_offset;
+            int iterator_segment;
+            neighbor_iterator.initialize(
+                task.xxi, task.xxx, task.yyi, task.yyy, task.zzi, task.zzz,
+                micro_cell_offsets, cell_pos, kDevSysPara.grid_size,
+                iterator_cell, iterator_offset, iterator_segment);
+            __shared__ float4 neighbor_positions[kSmsBlockThreads];
             if (warp_has_work)
             {
                 while (true)
                 {
-                    const int task_lane = threadIdx.x % SMS_TASK_PARTICLES;
-#if SMS_TASK_PARTICLES == 32
-                    const unsigned int task_mask = 0xFFFFFFFFu;
-#else
-                    const int subgroup_start = ((threadIdx.x & 31) / SMS_TASK_PARTICLES) * SMS_TASK_PARTICLES;
-                    const unsigned int task_mask = ((1u << SMS_TASK_PARTICLES) - 1u) << subgroup_start;
-#endif
-					int read_base = 0;
-                    int r = sdata.nextBatch(cell_offset_M, read_base,
-						iterator_cell, iterator_offset, iterator_segment);
-                    if (0 == r) break;  // neighbor cells read complete
-					if (task_lane < r)
-						shared_pos[threadIdx.x] = __ldg(&buff_list.position_d[read_base + task_lane]);
-					const int task_base = threadIdx.x - task_lane;
-                    __syncwarp(task_mask);
-                    knComputeCellDensityReg64(shared_pos, task_base, &data, r);
-                    __syncwarp(task_mask);
+                    const int task_lane = threadIdx.x & (kSmsTaskParticles - 1);
+                    int neighbor_begin = 0;
+                    int neighbor_count = neighbor_iterator.nextBatch(
+                        micro_cell_offsets, neighbor_begin,
+                        iterator_cell, iterator_offset, iterator_segment);
+                    if (neighbor_count == 0) break;
+                    if (task_lane < neighbor_count)
+                    {
+                        neighbor_positions[threadIdx.x] = __ldg(
+                            &buffers.position_d[neighbor_begin + task_lane]);
+                    }
+                    const int task_base = threadIdx.x - task_lane;
+                    __syncwarp(kFullWarpMask);
+                    accumulateDensityRegisterBatch(neighbor_positions, task_base, &self_data, neighbor_count);
+                    __syncwarp(kFullWarpMask);
                 }
             }
         }
 #else
         // Original shared-memory SMS path for both same-cell and different-cell tasks.
-        __shared__ SimDenSharedData128 sdata;
-		sdata.initialize(bt.zzi, bt.zzz, bt.xxi, bt.xxx, cell_offset_M, isSame, cell_offset, cell_num, cellpos, kDevSysPara.grid_size);
+        constexpr int is_same = 0;
+        __shared__ SimDenSharedData128 shared_data;
+        shared_data.initialize(task.zzi, task.zzz, task.xxi, task.xxx,
+                               micro_cell_offsets, is_same, cell_offsets, cell_particle_counts,
+                               cell_pos, kDevSysPara.grid_size);
         while (true)
         {
-			__syncthreads();
-			int r = sdata.read32Data(cell_offset_M, isSame, buff_list);
-			__syncthreads();
-            if (0 == r) break;  // neighbor cells read complete
+            __syncthreads();
+            int neighbor_count = shared_data.read32Data(
+                micro_cell_offsets, is_same, buffers);
+            __syncthreads();
+            if (neighbor_count == 0) break;
             if (active)
             {
-				knComputeCellDensitySMS64(isSame, &sdata, &data, r);
+                knComputeCellDensitySMS64(
+                    is_same, &shared_data, &self_data, neighbor_count);
             }
         }
 #endif
 
         if (active)
         {
-            data.pos.w *= kDevSysPara.mass * kDevSysPara.poly6_value;
-            data.pos.w += kDevSysPara.self_density;
-            float stored_density = data.pos.w < kFloatSmall ? kDevSysPara.rest_density : data.pos.w;
-            buff_list.position_d[self_idx].w = __fdividef(1.0f, stored_density);  // position_d.w stores 1/density
-            buff_list.evaluated_velocity[self_idx].w = (powf_7(__fdividef(data.pos.w, kDevSysPara.rest_density)) - 1) * kDevSysPara.gas_constant;
+            self_data.pos.w *= kDevSysPara.mass * kDevSysPara.poly6_value;
+            self_data.pos.w += kDevSysPara.self_density;
+            float stored_density = self_data.pos.w < kFloatSmall ? kDevSysPara.rest_density : self_data.pos.w;
+            buffers.position_d[self_idx].w = __fdividef(1.0f, stored_density);  // position_d.w stores 1/density
+            buffers.evaluated_velocity[self_idx].w =
+                (powf_7(__fdividef(
+                    self_data.pos.w, kDevSysPara.rest_density)) - 1)
+                * kDevSysPara.gas_constant;
 
-			float denv = (5000 - data.pos.w) / 6000;
-			buff_list.color[self_idx] = COLORA(1.0f*denv, 1.0f*denv, 0.f, 1.0);
+            float density_color = (5000 - self_data.pos.w) / 6000;
+            buffers.color[self_idx] = COLORA(
+                density_color, density_color, 0.0f, 1.0f);
         }
     }
 }
 
-void launchDensityHybrid128n(int number_blocks, bool sms_only,
-    int *cell_offset_M, ParticleIdxRange range, ParticleBufferList buff_list,
-    int *cindex, int *cell_offset, int *cell_num, BlockTask *block_task,
-    const int *d_num_block, const int *d_middle)
+void launchDensityHybridKernel(
+    int block_count, bool sms_only, int *micro_cell_offsets,
+    ParticleIdxRange tra_range, ParticleBufferList buffers,
+    int *compact_indices, int *cell_offsets, int *cell_particle_counts,
+    const BlockTask *block_tasks, const int *device_sms_task_count,
+    const int *device_middle)
 {
     if (sms_only)
     {
-        kncomputeDensityHybrid128nImpl<true><<<number_blocks, SMS_BLOCK_THREADS>>>(
-            cell_offset_M, range, buff_list, cindex, cell_offset, cell_num,
-            block_task, d_num_block, d_middle);
+        computeDensityHybridKernel<true><<<block_count, kSmsBlockThreads>>>(
+            micro_cell_offsets, tra_range, buffers, compact_indices,
+            cell_offsets, cell_particle_counts, block_tasks,
+            device_sms_task_count, device_middle);
     }
     else
     {
-        kncomputeDensityHybrid128nImpl<false><<<number_blocks, SMS_BLOCK_THREADS>>>(
-            cell_offset_M, range, buff_list, cindex, cell_offset, cell_num,
-            block_task, d_num_block, d_middle);
+        computeDensityHybridKernel<false><<<block_count, kSmsBlockThreads>>>(
+            micro_cell_offsets, tra_range, buffers, compact_indices,
+            cell_offsets, cell_particle_counts, block_tasks,
+            device_sms_task_count, device_middle);
     }
 }
 

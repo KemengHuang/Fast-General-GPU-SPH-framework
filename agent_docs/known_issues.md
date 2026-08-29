@@ -59,8 +59,6 @@ Items are ordered by severity, not by priority.
   `force_kernels.cu`/`integration_kernels.cu`, ~8 dead arrange variants, ~1700 lines of unused
   shared-data classes in `kernel_common.cuh`, the whole `cuda_prescan` module (CUB replaced it),
   `initializeScene2`/`addParticle2`/`action1`, marching cubes, unused shaders.
-- `apply_reg.py` (repo root) and `src/solver/density_kernels.cu.register_attempt` are leftover
-  experiment artifacts — safe to delete.
 - `knCalculateBlockRequirementHybridMode` (`src/io/gpu_model.cu:165`) uses `(nump_self + 27) >> 5`
   in one branch, which under-allocates one SMS task for cells with 33–36 particles (tail particles
   keep stale density for the frame). Upstream heuristic quirk; changing it alters published

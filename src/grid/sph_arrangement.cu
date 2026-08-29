@@ -93,7 +93,7 @@ __global__ void CountingSort_Cell_Sum_two_M(int* hashp, int *p_offset, int *hash
 		//selfHash = block_reqs[selfHash] > 0 ? (selfHash + numc) : selfHash;
 
 
-		selfHash = block_reqs[selfHash] * SMS_TASK_PARTICLES > p_offset[x_id] ? (selfHash + numc) : selfHash;
+		selfHash = block_reqs[selfHash] * kSmsTaskParticles > p_offset[x_id] ? (selfHash + numc) : selfHash;
 		/*   int thd = block_reqs[selfHash] * 32;
 		if (thd <= p_offset[x_id]){
 		selfHash = selfHash;
@@ -629,8 +629,11 @@ Arrangement::Arrangement(ParticleBufferObject &buff_list, ParticleBufferObject &
     CUDA_SAFE_CALL(cudaMalloc(&cell_type, numc_ * sizeof(int)));
 
 
-	const size_t task_capacity = ceil_int(static_cast<int>(nump_capacity_), SMS_TASK_PARTICLES) + numc_ + SMS_TASKS_PER_BLOCK;
-	CUDA_SAFE_CALL(cudaMalloc(&d_block_task_, task_capacity * sizeof(BlockTask)));
+    const size_t task_capacity =
+        ceil_int(static_cast<int>(nump_capacity_), kSmsTaskParticles)
+        + numc_ + kSmsTasksPerBlock;
+    CUDA_SAFE_CALL(cudaMalloc(&d_block_task_,
+                              task_capacity * sizeof(BlockTask)));
     CUDA_SAFE_CALL(cudaMalloc(&d_num_block_, sizeof(int)));
 
     CUDA_SAFE_CALL(cudaMalloc(&d_middle_value_, sizeof(int)));
@@ -842,77 +845,74 @@ void knArrangeTasksFixed(BlockTask *block_tasks, int *num_block, int *block_reqs
     }
 }
 __global__
-void knArrangeTasksFixedM(int *hash, int* celloff, int *cellnum,
-    BlockTask *block_tasks, int *num_block, int *block_reqs,
-    int *breqs_offset, ushort3 grid_size, int cta_size, int numc) {
-	unsigned int idx = threadIdx.x + __umul24(blockDim.x, blockIdx.x);
+void knArrangeIndependentSmsTasks(
+    const int *hash, const int *cell_offsets, const int *cell_particle_counts,
+    BlockTask *block_tasks, int *total_task_count,
+    const int *cell_task_counts, const int *cell_task_offsets, int cell_count)
+{
+    const int cell_id = threadIdx.x + __umul24(blockDim.x, blockIdx.x);
+    if (cell_id >= cell_count) return;
 
-	if (idx >= numc) return;
-	int start = celloff[idx];
-	int offset = breqs_offset[idx];
-	int numb = block_reqs[idx];
-	int p_offset = 0;
-	int nump = cellnum[idx];
-	//ushort3 cell_pos = CellIdx2CellPos(idx, grid_size);
+    const int particle_begin = cell_offsets[cell_id];
+    const int particle_count = cell_particle_counts[cell_id];
+    const int task_begin = cell_task_offsets[cell_id];
+    const int task_count = cell_task_counts[cell_id];
 
-	for (int i = offset; i < offset + numb; ++i) {
-		int hashA = hash[start + p_offset];
-		int xxi = ((hashA & 0x030) >> 4);
-		int zzi = ((hashA & 0x0c) >> 2);
-		int yyi = (hashA & 0x03);
-		BlockTask bt;
-	//	bt.cell_pos = cell_pos;
-		bt.p_offset = p_offset;
-		bt.cellid = idx;
-		//block_tasks[i] = bt;
-		p_offset += cta_size;
-		int  hashB;// = hash[start + p_offset - 1];
-		if (p_offset >= nump){
-			hashB = hash[start + nump - 1];
+    for (int local_task = 0; local_task < task_count; ++local_task)
+    {
+        const int particle_offset = local_task * kSmsTaskParticles;
+        const int first_hash = hash[particle_begin + particle_offset];
+        const int last_offset = min(
+            particle_offset + kSmsTaskParticles - 1, particle_count - 1);
+        const int last_hash = hash[particle_begin + last_offset];
 
-		}
-		else{
-			hashB = hash[start + p_offset - 1];
-		}
-		int xxx = ((hashB & 0x030) >> 4);
-		int zzz = ((hashB & 0x0c) >> 2);
-		int yyy = (hashB & 0x03);
-		//bt.isSame &= 0x0;
-		bt.xxi = xxi;
-		bt.xxx = xxx;
+        const int min_x = (first_hash >> 4) & 3;
+        const int max_x = (last_hash >> 4) & 3;
+        const int min_z = (first_hash >> 2) & 3;
+        const int max_z = (last_hash >> 2) & 3;
+        const int min_y = first_hash & 3;
+        const int max_y = last_hash & 3;
 
-		if (xxi == xxx){
-			bt.zzi = zzi;
-			bt.zzz = zzz;
-			if (zzi == zzz) {
-				bt.yyi = yyi;
-				bt.yyy = yyy;
-			}
-			else {
-				bt.yyi = 0;
-				bt.yyy = 3;
-			}
-		}
-		else{
-			bt.zzi = 0;
-			bt.zzz = 3;
-			bt.yyi = 0;
-			bt.yyy = 3;
-		}
-		block_tasks[i] = bt;
-	}
+        BlockTask task;
+        task.cellid = cell_id;
+        task.p_offset = static_cast<unsigned short>(particle_offset);
+        task.isSame = 0;
+        task.xxi = static_cast<char>(min_x);
+        task.xxx = static_cast<char>(max_x);
 
-	if (idx == numc - 1) {
-		*num_block = offset + numb;
-	}
+        if (min_x == max_x)
+        {
+            task.zzi = static_cast<char>(min_z);
+            task.zzz = static_cast<char>(max_z);
+            if (min_z == max_z)
+            {
+                task.yyi = static_cast<char>(min_y);
+                task.yyy = static_cast<char>(max_y);
+            }
+            else
+            {
+                task.yyi = 0;
+                task.yyy = 3;
+            }
+        }
+        else
+        {
+            task.zzi = 0;
+            task.zzz = 3;
+            task.yyi = 0;
+            task.yyy = 3;
+        }
+        block_tasks[task_begin + local_task] = task;
+    }
+
+    if (cell_id == cell_count - 1)
+        *total_task_count = task_begin + task_count;
 }
-
 __global__
 void judgeTask(BlockTask *block_tasks, int *num_block) {
 	unsigned int idx = threadIdx.x + __umul24(blockDim.x, blockIdx.x);
 	int numb = num_block[0];
 	if (idx >= numb) return;
-#if SMS_PAIR_TASK_COALESCING
 	if (numb % 2 == 0){
 		if (idx % 2 == 0){
 			if (block_tasks[idx].cellid == block_tasks[idx + 1].cellid){
@@ -959,65 +959,38 @@ void judgeTask(BlockTask *block_tasks, int *num_block) {
 			block_tasks[idx + 1].p_offset = block_tasks[idx].p_offset + 32;
 		}
 	}
-#else
-    // The live register and shared fallbacks both execute one independent
-    // 32-particle task per warp.  Do not widen an even task's micro-cell bounds
-    // to those of the following task; that only adds out-of-radius candidates.
-    block_tasks[idx].isSame = 0;
-
-    // A fused 64-thread launch still needs a valid descriptor for an odd tail.
-    // Copy all bounds before moving the padded task past the last self particle.
-    if ((numb & 1) && idx == numb - 1)
-    {
-        block_tasks[numb] = block_tasks[idx];
-        block_tasks[numb].p_offset = block_tasks[idx].p_offset + 32;
-        block_tasks[numb].isSame = 0;
-    }
-#endif
 }
 
-#if !SMS_PAIR_TASK_COALESCING
 __global__
-void padIndependentTasks(BlockTask *block_tasks, const int *num_block) {
-	int numb = num_block[0];
-	if (numb <= 0) return;
-	int padded_count = ceil_int(numb, SMS_TASKS_PER_BLOCK) * SMS_TASKS_PER_BLOCK;
-	for (int idx = numb; idx < padded_count; ++idx) {
-		block_tasks[idx] = block_tasks[numb - 1];
-		block_tasks[idx].p_offset += static_cast<unsigned short>((idx - numb + 1) * SMS_TASK_PARTICLES);
-		block_tasks[idx].isSame = 0;
-	}
+void padIndependentSmsTasks(BlockTask *block_tasks,
+                            const int *device_task_count)
+{
+    const int task_count = __ldg(device_task_count);
+    if (task_count <= 0 || (task_count & 1) == 0) return;
+    block_tasks[task_count] = block_tasks[task_count - 1];
+    block_tasks[task_count].p_offset += kSmsTaskParticles;
 }
-#endif
 
-void Arrangement::arrangeBlockTasksFixedM(int *hash, int *celloff, int *cellnum, BlockTask* d_task_array, int* d_cta_reqs, int* d_task_array_offset, int cta_size) {
-	int num_thread = 128;
-	int num_block = ceil_int(numc_, num_thread);
+void Arrangement::arrangeIndependentSmsTasks(
+    const int *hash, const int *cell_offsets,
+    const int *cell_particle_counts, BlockTask *tasks,
+    const int *cell_task_counts, const int *cell_task_offsets)
+{
+    constexpr int thread_count = 128;
+    const int block_count = ceil_int(numc_, thread_count);
 
-	knArrangeTasksFixedM << <num_block, num_thread >> >(hash, celloff, cellnum,
-        d_task_array, d_num_cta_, d_cta_reqs, d_task_array_offset,
-        grid_size_, cta_size, numc_);
+    knArrangeIndependentSmsTasks<<<block_count, thread_count>>>(
+        hash, cell_offsets, cell_particle_counts, tasks, d_num_cta_,
+        cell_task_counts, cell_task_offsets, numc_);
 
 #if HYBRID_DEVICE_GRID_SIZING
-#if SMS_PAIR_TASK_COALESCING
-	// No host readback: judgeTask and the physics kernels size themselves on device.
-	// judgeTask's grid is over-provisioned with a safe upper bound on the task count
-	// (each task covers 32 particles and each cell adds at most one partial task).
-	int task_bound = ceil_int(nump_, 32) + numc_;
-	judgeTask << <ceil_int(task_bound, num_thread), num_thread >> >(d_task_array, d_num_cta_);
-#else
-	padIndependentTasks<<<1, 1>>>(d_task_array, d_num_cta_);
-#endif
+	padIndependentSmsTasks<<<1, 1>>>(tasks, d_num_cta_);
 #else
 	CUDA_SAFE_CALL(cudaMemcpyAsync(h_num_cta_pinned_, d_num_cta_, sizeof(int), cudaMemcpyDeviceToHost, 0));
 	CUDA_SAFE_CALL(cudaStreamSynchronize(0));
 	h_num_cta_ = *h_num_cta_pinned_;
 	middle_value_ = *h_middle_value_pinned_;
-#if SMS_PAIR_TASK_COALESCING
-	judgeTask << <ceil_int(h_num_cta_, num_thread), num_thread >> >(d_task_array, d_num_cta_);
-#else
-	padIndependentTasks<<<1, 1>>>(d_task_array, d_num_cta_);
-#endif
+	padIndependentSmsTasks<<<1, 1>>>(tasks, d_num_cta_);
 #endif
 }
 
@@ -1427,7 +1400,7 @@ void Arrangement::CountingSortCUDA_Two9_M()
 	knFindHybridModeMiddleValue << <num_block, num_thread, shared_mem_size >> >(numc_, d_middle_value_, hashp, nump_);
 #if !HYBRID_DEVICE_GRID_SIZING
 	    CUDA_SAFE_CALL(cudaMemcpyAsync(h_middle_value_pinned_, d_middle_value_, sizeof(int), cudaMemcpyDeviceToHost, 0));
-    // Sync is deferred to arrangeBlockTasksFixedM() so both scalar reads can share one stream sync.
+    // Sync is deferred to arrangeIndependentSmsTasks() so both scalar reads can share one stream sync.
 #endif
 }
 
@@ -1439,16 +1412,20 @@ int Arrangement::arrangeHybridMode9(){
     arrangeBlockTasksFixed(d_block_task_, d_block_reqs_, d_task_array_offset_32_, 32);
     return (middle_value_ > nump_ || middle_value_ < 0) ? nump_ : middle_value_;
 }
-void Arrangement::arrangeHybridMode9M(){
-	CountingSort_O_M();
-	gpu_model::calculateBlockRequirementHybridMode(cell_type, d_cell_nump_, d_block_reqs_, p_gpu_model_, d_cell_offset_, d_cell_nump_, grid_size_, SMS_TASK_PARTICLES);
-	CountingSortCUDA_Two9_M();
-	//prescanArrayRecursiveInt(d_task_array_offset_32_, d_block_reqs_, numc_, 0);
-	cub::DeviceScan::ExclusiveSum(d_cub_scan_temp_, cub_scan_temp_bytes_,
+void Arrangement::arrangeHybridFrame()
+{
+    CountingSort_O_M();
+    gpu_model::calculateBlockRequirementHybridMode(
+        cell_type, d_cell_nump_, d_block_reqs_, p_gpu_model_,
+        d_cell_offset_, d_cell_nump_, grid_size_, kSmsTaskParticles);
+    CountingSortCUDA_Two9_M();
+    cub::DeviceScan::ExclusiveSum(d_cub_scan_temp_, cub_scan_temp_bytes_,
                                   d_block_reqs_, d_task_array_offset_32_, numc_);
-	arrangeBlockTasksFixedM(d_hash_, d_cell_offset_, d_cell_nump_, d_block_task_, d_block_reqs_, d_task_array_offset_32_, SMS_TASK_PARTICLES);
-	// The TRA/SMS split point stays on device (d_middle_value_); the physics
-	// kernels clamp and consume it there.
+    arrangeIndependentSmsTasks(
+        d_hash_, d_cell_offset_, d_cell_nump_, d_block_task_,
+        d_block_reqs_, d_task_array_offset_32_);
+    // The TRA/SMS split point stays on device (d_middle_value_); the physics
+    // kernels clamp and consume it there.
 }
 int Arrangement::arrangeHybridMode(){
     //calculateHash();
@@ -1534,12 +1511,12 @@ int* Arrangement::getDevCellEndIdx()
     return d_end_index_;
 }
 
-int Arrangement::getNumBlockSMSMode()
+int Arrangement::getSmsTaskCount() const
 {
-    return h_num_cta_;//h_num_block_;
+    return h_num_cta_;
 }
 
-BlockTask * Arrangement::getBlockTasks()
+const BlockTask *Arrangement::getSmsTasks() const
 {
     return d_block_task_;
 }

@@ -31,6 +31,39 @@ namespace sph
 const char *kDefaultSceneFileName = "assets/scene_default.json";
 const uint kDefaultBufferCapacity = 65536U;
 
+namespace {
+
+struct BenchmarkStateChecksum {
+    double position_x = 0.0;
+    double position_y = 0.0;
+    double position_z = 0.0;
+    double inverse_density = 0.0;
+    double weighted_position = 0.0;
+};
+
+BenchmarkStateChecksum computeBenchmarkStateChecksum(
+    float4 *host_positions, const float4 *device_positions, uint particle_count)
+{
+    CUDA_SAFE_CALL(cudaMemcpy(host_positions, device_positions,
+                              static_cast<size_t>(particle_count) * sizeof(float4),
+                              cudaMemcpyDeviceToHost));
+
+    BenchmarkStateChecksum checksum;
+    for (uint i = 0; i < particle_count; ++i)
+    {
+        const float4 position = host_positions[i];
+        checksum.position_x += position.x;
+        checksum.position_y += position.y;
+        checksum.position_z += position.z;
+        checksum.inverse_density += position.w;
+        checksum.weighted_position += static_cast<double>((i & 1023u) + 1u)
+            * (position.x + 3.0 * position.y + 7.0 * position.z);
+    }
+    return checksum;
+}
+
+} // namespace
+
 /****************************** utilities ******************************/
 
 #define COLORA(r,g,b,a)	( (uint((a)*255.0f)<<24) | (uint((b)*255.0f)<<16) | (uint((g)*255.0f)<<8) | uint((r)*255.0f) )
@@ -240,29 +273,22 @@ HybridSystem::~HybridSystem()
     resetBuffer(0);
     releaseKernel();
 }
-int tt = 0;
-float time = 0;
 void HybridSystem::tick()
 {
     if (!is_running_) return;
-	tt++;
     tick_timer_.set_start();
-    static int step = 0;
+    static int frame_index = 0;
     if (get_detailed_time_ && !tick_events_created_)
     {
         createPersistentCudaResources();
     }
-    int *d_index = arrangement_->getDevCellIndex();
-    int *cell_offset = arrangement_->getDevCellOffset();
-
-	int *cell_offsetM = arrangement_->getDevCellOffsetM();
-
-    int *cell_nump = arrangement_->getDevCellNumP();
+    int *compact_indices = arrangement_->getDevCellIndex();
+    int *cell_offsets = arrangement_->getDevCellOffset();
+    int *micro_cell_offsets = arrangement_->getDevCellOffsetM();
+    int *cell_particle_counts = arrangement_->getDevCellNumP();
     if (get_detailed_time_) CUDA_SAFE_CALL(cudaEventRecord(tick_events_[0]));
 
-    arrangement_->arrangeHybridMode9M();
-//    arrangement_->CountingSortCUDA();
-//    arrangement_->assignTasksFixedCTA();
+    arrangement_->arrangeHybridFrame();
 
 #if HYBRID_DEVICE_GRID_SIZING
     // TRA particles occupy [0, middle) of the compaction index. The physics kernels
@@ -271,30 +297,38 @@ void HybridSystem::tick()
     ParticleIdxRange tra_range(0, nump_);
     // Safe upper bound on the SMS task count: one task per 32 particles plus at
     // most one partial task per cell.
-    int sms_task_bound = (nump_ + 31) / 32 + arrangement_->getNumC();
+    int sms_task_upper_bound = ceil_int(
+        static_cast<int>(nump_), kSmsTaskParticles)
+        + arrangement_->getNumC();
 #else
     // Host-synced sizing: middle_value_ is valid after the arrange sync.
-    int middle_host = arrangement_->getMiddleValue();
-    if (middle_host < 0 || middle_host > (int)nump_) middle_host = nump_;
+    int middle_host = arrangement_->getTraParticleCount();
+    if (middle_host < 0 || middle_host > static_cast<int>(nump_))
+        middle_host = nump_;
     ParticleIdxRange tra_range(0, middle_host);
-    int sms_task_bound = 0;  // unused on the host-synced path
+    int sms_task_upper_bound = 0;  // unused on the host-synced path
 #endif
     if (get_detailed_time_) CUDA_SAFE_CALL(cudaEventRecord(tick_events_[1]));
 
-	computeDensityHybrid128n(cell_offsetM, tra_range, device_buff_.get_buff_list(), d_index, cell_offset, cell_nump, arrangement_->getBlockTasks(), arrangement_->getNumBlockSMSMode(), arrangement_->getDevNumCTA(), arrangement_->getDevMiddleValue(), sms_task_bound);
-//    computeDensitySMS64(device_buff_.get_buff_list(), cell_offset, cell_nump, arrangement_->getBlockTasks(), arrangement_->getNumBlockSMSMode());
-//    computeDensityTRA(device_buff_.get_buff_list(), ParticleIdxRange(0, nump_), cell_offset, cell_nump);
-    //   std::cout << step << std::endl;
+    computeDensityHybrid(
+        micro_cell_offsets, tra_range, device_buff_.get_buff_list(),
+        compact_indices, cell_offsets, cell_particle_counts,
+        arrangement_->getSmsTasks(), arrangement_->getSmsTaskCount(),
+        arrangement_->getDeviceSmsTaskCount(),
+        arrangement_->getDeviceTraParticleCount(),
+        sms_task_upper_bound);
     if (get_detailed_time_) CUDA_SAFE_CALL(cudaEventRecord(tick_events_[2]));
 
-	computeForceHybrid128n(cell_offsetM, tra_range, device_buff_.get_buff_list(), d_index, cell_offset, cell_nump, arrangement_->getBlockTasks(), arrangement_->getNumBlockSMSMode(), arrangement_->getDevNumCTA(), arrangement_->getDevMiddleValue(), sms_task_bound);
-//    computeForceSMS64(device_buff_.get_buff_list(), cell_offset, cell_nump, arrangement_->getBlockTasks(), arrangement_->getNumBlockSMSMode());
-//    computeForceTRA(device_buff_.get_buff_list(), ParticleIdxRange(0, nump_), cell_offset, cell_nump);
+    computeForceHybrid(
+        micro_cell_offsets, tra_range, device_buff_.get_buff_list(),
+        compact_indices, cell_offsets, cell_particle_counts,
+        arrangement_->getSmsTasks(), arrangement_->getSmsTaskCount(),
+        arrangement_->getDeviceSmsTaskCount(),
+        arrangement_->getDeviceTraParticleCount(),
+        sms_task_upper_bound);
     if (get_detailed_time_) CUDA_SAFE_CALL(cudaEventRecord(tick_events_[3]));
 
     advance(device_buff_.get_buff_list(), nump_);
-	//advanceWave(device_buff_.get_buff_list(), nump_,time);
-	time += sys_para_.time_step;
     if (get_detailed_time_) CUDA_SAFE_CALL(cudaEventRecord(tick_events_[4]));
 
     // Record the point where all simulation kernels for this frame finish.
@@ -327,8 +361,8 @@ void HybridSystem::tick()
         CUDA_SAFE_CALL(cudaEventElapsedTime(&force_time_, tick_events_[2], tick_events_[3]));
         CUDA_SAFE_CALL(cudaEventElapsedTime(&total_time_, tick_events_[0], tick_events_[4]));
     }
-    ++step;
-    loop = step;
+    ++frame_index;
+    loop = frame_index;
     if (loop > 640) {
   //      exit(0);
     }
@@ -382,41 +416,25 @@ void HybridSystem::runBenchmark(int frames)
                                            : total_kernel / warmup_frames;
     double fps = 1000.0 / avg_frame;
 
-    // Deterministic aggregate for register/shared numerical A/B checks.  The
-    // copy and host reduction happen after the measured interval.
-    ParticleBufferList host_list = host_buff_.get_buff_list();
-    ParticleBufferList device_list = device_buff_.get_buff_list();
-    CUDA_SAFE_CALL(cudaMemcpy(host_list.position_d, device_list.position_d,
-                              static_cast<size_t>(nump_) * sizeof(float4),
-                              cudaMemcpyDeviceToHost));
-    double position_sum_x = 0.0;
-    double position_sum_y = 0.0;
-    double position_sum_z = 0.0;
-    double density_reciprocal_sum = 0.0;
-    double weighted_position_sum = 0.0;
-    for (uint i = 0; i < nump_; ++i)
-    {
-        const float4 pos = host_list.position_d[i];
-        position_sum_x += pos.x;
-        position_sum_y += pos.y;
-        position_sum_z += pos.z;
-        density_reciprocal_sum += pos.w;
-        weighted_position_sum += static_cast<double>((i & 1023u) + 1u)
-            * (pos.x + 3.0 * pos.y + 7.0 * pos.z);
-    }
+    // The copy and reduction happen after the measured interval.
+    const BenchmarkStateChecksum checksum = computeBenchmarkStateChecksum(
+        host_buff_.get_buff_list().position_d,
+        device_buff_.get_buff_list().position_d, nump_);
 
-    std::cout << "\n========== Headless benchmark (" << measured_frames << " measured + " << warmup_frames << " warm-up frames) ==========\n";
+    std::cout << "\n========== Headless benchmark (" << measured_frames
+              << " measured + " << warmup_frames
+              << " warm-up frames) ==========\n";
     std::cout << "Total wall time: " << elapsed_ms << " ms\n";
     std::cout << "Average frame time: " << avg_frame << " ms\n";
     std::cout << "FPS: " << fps << "\n";
     std::cout << std::setprecision(17);
-    std::cout << "State checksum: " << position_sum_x << ", "
-              << position_sum_y << ", " << position_sum_z << ", "
-              << density_reciprocal_sum << ", "
-              << weighted_position_sum << "\n";
+    std::cout << "State checksum: " << checksum.position_x << ", "
+              << checksum.position_y << ", " << checksum.position_z << ", "
+              << checksum.inverse_density << ", "
+              << checksum.weighted_position << "\n";
     std::cout << std::setprecision(6);
-    std::cout << "Hybrid split: " << arrangement_->getMiddleValue()
-              << " TRA particles, " << arrangement_->getNumBlockSMSMode()
+    std::cout << "Hybrid split: " << arrangement_->getTraParticleCount()
+              << " TRA particles, " << arrangement_->getSmsTaskCount()
               << " SMS tasks\n";
     std::cout << "Per-stage averages (CUDA events, warm-up frames):\n";
     std::cout << "  arrange/grid : " << (total_arrange / warmup_frames) << " ms\n";

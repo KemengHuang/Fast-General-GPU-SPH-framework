@@ -25,10 +25,12 @@ __global__
 void knComputeDensityTRA(ParticleBufferList buff_list, int *cell_offset, int *cell_num, ParticleIdxRange range);
 __global__
 void knComputeMixDensityTRA(ParticleBufferList buff_list, int *cell_offset, int *cell_num, ParticleIdxRange range);
-void launchDensityHybrid128n(int number_blocks, bool sms_only,
-    int *cell_offset_M, ParticleIdxRange range, ParticleBufferList buff_list,
-    int *cindex, int *cell_offset, int *cell_num, BlockTask *block_task,
-    const int *d_num_block, const int *d_middle);
+void launchDensityHybridKernel(
+    int block_count, bool sms_only, int *micro_cell_offsets,
+    ParticleIdxRange tra_range, ParticleBufferList buffers,
+    int *compact_indices, int *cell_offsets, int *cell_particle_counts,
+    const BlockTask *block_tasks, const int *device_sms_task_count,
+    const int *device_middle);
 
 }
 

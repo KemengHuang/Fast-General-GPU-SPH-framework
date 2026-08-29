@@ -2,14 +2,9 @@
 
 #include "solver/kernel_common.cuh"
 
-// Switch for the force SMS different-cell path:
-// 0 = original shared-memory path for both same-cell and different-cell tasks
-// 1 = register-load + warp-local shared exchange for different-cell tasks,
-//     shared-memory path kept for same-cell tasks (dominant case)
-#ifndef FORCE_SMS_USE_REGISTER_PATH
-#define FORCE_SMS_USE_REGISTER_PATH 1
-#endif
-
+// Select the live SMS implementation:
+// 0 = legacy shared-memory iterator and neighbor staging
+// 1 = register iterator state with warp-local neighbor staging
 namespace sph {
 __device__
 inline void knComputeCellForceSMS64(const int& isSame, float3 *pres_kn, float3 *vis_kn, SimForSharedData128 *sdata, CFData *self_data, int read_num)
@@ -247,44 +242,49 @@ inline void knComputeCellOtherForceSMS9_64(float3 *boundary_force, float3 *vis_k
 
 }
 
-#if FORCE_SMS_USE_REGISTER_PATH
+#if GSPH_USE_REGISTER_SMS
 __device__ __forceinline__
-void knComputeCellForceReg64(float4 *shared_pos, float4 *shared_ev, int warp_base,
-                             float3 *pres_kn, float3 *vis_kn,
-                             CFData *self_data, int read_num)
+void accumulateForceRegisterBatch(const float4 *neighbor_positions,
+                                  const float4 *neighbor_velocities,
+                                  int warp_base, float3 *pressure_sum,
+                                  float3 *viscosity_sum, CFData *self_data,
+                                  int neighbor_count)
 {
-    for (int i = warp_base; i < warp_base + read_num; ++i)
+    for (int i = warp_base; i < warp_base + neighbor_count; ++i)
     {
-        float4 neighbor_position = shared_pos[i];
+        float4 neighbor_position = neighbor_positions[i];
         float3 rel_pos = cal_rePos(neighbor_position, self_data->pos);
 
-        float dis_2 = rel_pos.x * rel_pos.x + rel_pos.y * rel_pos.y + rel_pos.z * rel_pos.z;
+        float distance_squared = rel_pos.x * rel_pos.x
+            + rel_pos.y * rel_pos.y + rel_pos.z * rel_pos.z;
 
-        if (kDevSysPara.kernel_2 < dis_2 || kFloatSmall > dis_2)
+        if (kDevSysPara.kernel_2 < distance_squared ||
+            kFloatSmall > distance_squared)
             continue;
 
-        float4 neighbor_ev = shared_ev[i];
-        float inv_dis = rsqrtf(dis_2);
-        float dis = dis_2 * inv_dis;
-        float V = neighbor_position.w;  // position_d.w stores 1/density
-        float kernel_r = kDevSysPara.kernel - dis;
-        float weighted_kernel_r = V * kernel_r;
+        float4 neighbor_velocity = neighbor_velocities[i];
+        float inverse_distance = rsqrtf(distance_squared);
+        float distance = distance_squared * inverse_distance;
+        float inverse_density = neighbor_position.w;
+        float kernel_distance = kDevSysPara.kernel - distance;
+        float weighted_kernel_distance = inverse_density * kernel_distance;
 
         // pressure force
-        float temp_pres_kn = weighted_kernel_r
-            * (self_data->ev.w + neighbor_ev.w) * kernel_r;
-        *pres_kn -= rel_pos * (temp_pres_kn * inv_dis);
+        float pressure_weight = weighted_kernel_distance
+            * (self_data->ev.w + neighbor_velocity.w) * kernel_distance;
+        *pressure_sum -= rel_pos * (pressure_weight * inverse_distance);
 
         // viscosity force
-        float3 rel_vel = cal_rePos(self_data->ev, neighbor_ev);
-        *vis_kn += rel_vel * weighted_kernel_r;
+        float3 relative_velocity = cal_rePos(self_data->ev, neighbor_velocity);
+        *viscosity_sum += relative_velocity * weighted_kernel_distance;
 
         // surface force
-        float h2_r2 = kDevSysPara.kernel_2 - dis_2;
-        float weighted_h2 = V * h2_r2;
-        float temp = weighted_h2 * h2_r2;
-        self_data->grad_color += rel_pos * temp;
-        self_data->lplc_color += weighted_h2 * (dis_2 - 0.75f * h2_r2);
+        float h2_r2 = kDevSysPara.kernel_2 - distance_squared;
+        float weighted_h2 = inverse_density * h2_r2;
+        float gradient_weight = weighted_h2 * h2_r2;
+        self_data->grad_color += rel_pos * gradient_weight;
+        self_data->lplc_color += weighted_h2
+            * (distance_squared - 0.75f * h2_r2);
     }
 }
 #endif
@@ -577,279 +577,249 @@ void knComputeOtherForceHybrid128n(ParticleIdxRange range, ParticleBufferList bu
 {
 
 }
-template <bool SmsOnly>
-__global__ __launch_bounds__(SMS_BLOCK_THREADS, SMS_MIN_BLOCKS_PER_SM)
-void kncomputeForceHybrid128nImpl(int *cell_offset_M,ParticleIdxRange range, ParticleBufferList buff_list, int *cindex, int *cell_offset, int *cell_num, BlockTask *block_task, const int *d_num_block, const int *d_middle)
+template <bool kSmsOnly>
+__global__ __launch_bounds__(kSmsBlockThreads, kSmsMinBlocksPerSm)
+void computeForceHybridKernel(
+    int *micro_cell_offsets, ParticleIdxRange tra_range,
+    ParticleBufferList buffers, int *compact_indices, int *cell_offsets,
+    int *cell_particle_counts, const BlockTask *block_tasks,
+    const int *device_sms_task_count, const int *device_middle)
 {
-    int bt_offset = 0;
-    if constexpr (!SmsOnly)
+    int tra_block_count = 0;
+    if constexpr (!kSmsOnly)
     {
         // Device-side TRA/SMS split: the host over-provisions the grid and excess
         // blocks exit immediately, so the frame needs no host readback/synchronization.
-        int middle = __ldg(d_middle);
-        if (middle < 0 || middle > range.end) middle = range.end;
-        bt_offset = ceil_int(middle - range.begin, SMS_BLOCK_THREADS);
+        int tra_particle_count = __ldg(device_middle);
+        if (tra_particle_count < 0 || tra_particle_count > tra_range.end)
+            tra_particle_count = tra_range.end;
+        tra_block_count = ceil_int(
+            tra_particle_count - tra_range.begin, kSmsBlockThreads);
 
-        if (blockIdx.x < bt_offset){
-        int self_idx = threadIdx.x + __umul24(blockIdx.x, blockDim.x) + range.begin;
-        if (self_idx >= middle) return;
-        self_idx = __ldg(&cindex[self_idx]);
+        if (blockIdx.x < tra_block_count)
+        {
+            int sorted_index = threadIdx.x
+                + __umul24(blockIdx.x, blockDim.x) + tra_range.begin;
+            if (sorted_index >= tra_particle_count) return;
 
-        register CFData self_data;
-        self_data.pos = __ldg(&buff_list.position_d[self_idx]);
-        self_data.ev = __ldg(&buff_list.evaluated_velocity[self_idx]); 
-   //     self_data.ev = buff_list.evaluated_velocity[self_idx];
-       
+            const int self_idx = __ldg(&compact_indices[sorted_index]);
+            CFData self_data;
+            self_data.pos = __ldg(&buffers.position_d[self_idx]);
+            self_data.ev = __ldg(&buffers.evaluated_velocity[self_idx]);
+            self_data.grad_color = make_float3(0.0f, 0.0f, 0.0f);
+            self_data.lplc_color = 0.0f;
 
-        self_data.grad_color = make_float3(0.0f, 0.0f, 0.0f);
-        self_data.lplc_color = 0.0f;
+            const ushort3 micro_cell = ParticlePos2CellPosM(
+                self_data.pos, kDevSysPara.inv_cell_size);
+            const ushort3 coarse_cell = calCI(micro_cell);
+            const int local_micro_x = micro_cell.x & 3;
+            float3 pressure_sum = make_float3(0.0f, 0.0f, 0.0f);
+            float3 viscosity_sum = make_float3(0.0f, 0.0f, 0.0f);
 
-
-		ushort3 cell_posc = ParticlePos2CellPosM(self_data.pos, kDevSysPara.inv_cell_size);
-
-		ushort3 cell_pos = calCI(cell_posc);
-		int xxx = (cell_posc.x) & 0x03;
-        //float3 total_force = make_float3(0.0f, 0.0f, 0.0f);
-        register float3 pres_kn = make_float3(0.0f, 0.0f, 0.0f);
-        register float3 vis_kn = make_float3(0.0f, 0.0f, 0.0f);
-
-
-
-
-        register ushort3 grid_size = kDevSysPara.grid_size;
-        register int cell_offset_;
-        register int cell_nump_;
-
-        for (int i = 0; i < 9; i++){
-            ushort3 neighbor_pos = cell_pos + make_ushort3(-1, i % 3 - 1, i / 3 % 3 - 1);
-            if (neighbor_pos.y < 0 || neighbor_pos.y >= grid_size.y ||
-                neighbor_pos.z < 0 || neighbor_pos.z >= grid_size.z) {
-                continue;
+            for (int neighbor_row = 0; neighbor_row < 9; ++neighbor_row)
+            {
+                const ParticleIdxRange neighbor_range =
+                    findTraNeighborParticleRange(
+                        micro_cell_offsets, cell_offsets,
+                        cell_particle_counts, coarse_cell,
+                        local_micro_x, neighbor_row % 3 - 1,
+                        neighbor_row / 3 - 1, kDevSysPara.grid_size);
+                knComputeCellForceTRA9(
+                    &pressure_sum, &viscosity_sum, buffers, &self_data,
+                    neighbor_range.begin,
+                    neighbor_range.end - neighbor_range.begin);
             }
-            else {
-                int nid_left, nid_mid, nid_right;
-                nid_left = CellPos2CellIdx(neighbor_pos, grid_size);
-                ++neighbor_pos.x;
-                nid_mid = CellPos2CellIdx(neighbor_pos, grid_size);
-                ++neighbor_pos.x;
-                nid_right = CellPos2CellIdx(neighbor_pos, grid_size);
-                /*cell_offset_ =
-                    kInvalidCellIdx == nid_left ? cell_offset[nid_mid] : cell_offset[nid_left];
-                cell_nump_ = cell_num[nid_mid];
-                if (kInvalidCellIdx != nid_left) cell_nump_ += cell_num[nid_left];
-                if (kInvalidCellIdx != nid_right) cell_nump_ += cell_num[nid_right];*/
 
-				cell_offset_ =
-					kInvalidCellIdx == nid_left ? __ldg(&cell_offset[nid_mid]) : __ldg(&cell_offset_M[(nid_left << 6) + (xxx << 4)]);
-				cell_nump_ = __ldg(&cell_num[nid_mid]);
-				if (kInvalidCellIdx != nid_left) cell_nump_ += __ldg(&cell_offset[nid_mid]) - __ldg(&cell_offset_M[(nid_left << 6) + (xxx << 4)]);
-				if (xxx == 3){
-					if (kInvalidCellIdx != nid_right) cell_nump_ += __ldg(&cell_num[nid_right]);
-				}
-				else{
-					if (kInvalidCellIdx != nid_right) cell_nump_ += __ldg(&cell_offset_M[(nid_right << 6) + ((xxx + 1) << 4)]) - __ldg(&cell_offset_M[(nid_right << 6)]);
-				}
+            float3 total_force = pressure_sum * kDevSysPara.spiky_value / 2
+                + viscosity_sum * kDevSysPara.viscosity
+                * kDevSysPara.visco_value;
+            self_data.grad_color *= kDevSysPara.grad_poly6 * kDevSysPara.mass;
+            self_data.lplc_color *= kDevSysPara.lplc_poly6 * kDevSysPara.mass;
+            self_data.lplc_color *= self_data.pos.w;
 
-                knComputeCellForceTRA9(&pres_kn, &vis_kn, buff_list, &self_data, cell_offset_, cell_nump_);
+            const float surface_normal = sqrtf(
+                self_data.grad_color.x * self_data.grad_color.x
+                + self_data.grad_color.y * self_data.grad_color.y
+                + self_data.grad_color.z * self_data.grad_color.z);
+            float3 surface_force = make_float3(0.0f, 0.0f, 0.0f);
+            if (surface_normal > kDevSysPara.surface_normal)
+            {
+                surface_force = self_data.grad_color
+                    * kDevSysPara.surface_coe * self_data.lplc_color
+                    / surface_normal;
             }
-        }
 
-        /* for (int z = -1; z <= 1; ++z)
-        {
-        for (int y = -1; y <= 1; ++y)
-        {
-        for (int x = -1; x <= 1; ++x)
-        {
-        ushort3 neigbor_cell_pos = cell_pos + make_ushort3(x, y, z);
-        knComputeCellForceTRA(&pres_kn, &vis_kn, buff_list, &self_data, cell_offset, cell_num, neigbor_cell_pos);
-        }
-        }
-        }*/
-
-        register float3 total_force = pres_kn * kDevSysPara.spiky_value / 2 + vis_kn * kDevSysPara.viscosity * kDevSysPara.visco_value;
-
-        self_data.grad_color *= kDevSysPara.grad_poly6 * kDevSysPara.mass;
-        self_data.lplc_color *= kDevSysPara.lplc_poly6 * kDevSysPara.mass;
-
-        self_data.lplc_color = self_data.lplc_color * self_data.pos.w;  // pos.w holds 1/density (loaded from position_d)
-        float sur_nor = sqrtf(self_data.grad_color.x * self_data.grad_color.x +
-                              self_data.grad_color.y * self_data.grad_color.y +
-                              self_data.grad_color.z * self_data.grad_color.z);
-        //buff_list.surface_normal_vector[self_idx] = sur_nor;
-
-        float3 force;
-        //force = self_data.grad_color * kDevSysPara.surface_coe * self_data.lplc_color / sur_nor;
-        if (sur_nor > kDevSysPara.surface_normal)
-        {
-            force = self_data.grad_color * kDevSysPara.surface_coe * self_data.lplc_color / sur_nor;
-        }
-        else
-        {
-            force = make_float3(0.0f, 0.0f, 0.0f);
-        }
-
-        total_force *= kDevSysPara.mass;// / buff_list.density[self_idx];
-        buff_list.acceleration[self_idx] = total_force + force;
-
-		
-		//buff_list.color
+            total_force *= kDevSysPara.mass;
+            buffers.acceleration[self_idx] = total_force + surface_force;
             return;
         }
     }
     {
 
-        int t = blockIdx.x - bt_offset;
-        if (t * SMS_TASKS_PER_BLOCK >= __ldg(d_num_block)) return;  // over-provisioned SMS block (block-uniform exit)
-		int n = t * SMS_TASKS_PER_BLOCK + threadIdx.x / SMS_TASK_PARTICLES;
-		BlockTask bt = block_task[n];
-        int isSame = 0;// bt.isSame;
+        int sms_block_index = blockIdx.x - tra_block_count;
+        if (sms_block_index * kSmsTasksPerBlock >= __ldg(device_sms_task_count))
+            return;
+        int task_index = sms_block_index * kSmsTasksPerBlock
+            + (threadIdx.x >> 5);
+        const BlockTask task = block_tasks[task_index];
 
-		int cell_id = bt.cellid;// CellPos2CellIdx(bt.cell_pos, kDevSysPara.grid_size);
-		ushort3 cellpos = CellIdx2CellPos(cell_id, kDevSysPara.grid_size);
+        int cell_id = task.cellid;
+        ushort3 cell_pos = CellIdx2CellPos(cell_id, kDevSysPara.grid_size);
 
-	/*	char a = bt.yyi;
-		char b = bt.yyy;
-		char c = bt.zzi;
-		char d = bt.zzz;*/
+        int cell_begin = __ldg(&cell_offsets[cell_id]);
+        int cell_particle_count = __ldg(&cell_particle_counts[cell_id]);
+        int self_idx = cell_begin + task.p_offset
+            + (threadIdx.x & (kSmsTaskParticles - 1));
 
-        register int cell_off = __ldg(&cell_offset[cell_id]);
-        register int cell_np = __ldg(&cell_num[cell_id]);
-        register int self_idx = cell_off + bt.p_offset + threadIdx.x % SMS_TASK_PARTICLES;
+        int cell_end = cell_begin + cell_particle_count;
+        const bool active = self_idx < cell_end;
 
-        register int temp_cell_end = cell_off + cell_np;
-        bool active = (self_idx < temp_cell_end);
+        float3 pressure_sum = make_float3(0.0f, 0.0f, 0.0f);
+        float3 viscosity_sum = make_float3(0.0f, 0.0f, 0.0f);
+        CFData self_data;
 
-        register float3 pres_kn = make_float3(0.0f, 0.0f, 0.0f);
-        register float3 vis_kn = make_float3(0.0f, 0.0f, 0.0f);
-        register CFData self_data;
-
-#if FORCE_SMS_USE_REGISTER_PATH
+#if GSPH_USE_REGISTER_SMS
         // Keep the warp-uniform inner loop branch-free while making inactive
         // tail lanes well-defined. Their accumulated result is discarded.
-        const int safe_self_idx = active ? self_idx : temp_cell_end - 1;
-        self_data.pos = __ldg(&buff_list.position_d[safe_self_idx]);
-        self_data.ev = __ldg(&buff_list.evaluated_velocity[safe_self_idx]);
+        const int safe_self_idx = active ? self_idx : cell_end - 1;
+        self_data.pos = __ldg(&buffers.position_d[safe_self_idx]);
+        self_data.ev = __ldg(&buffers.evaluated_velocity[safe_self_idx]);
         self_data.grad_color = make_float3(0.0f, 0.0f, 0.0f);
         self_data.lplc_color = 0.0f;
 #else
-        if (active)   // init self data
+        if (active)
         {
-            self_data.pos = __ldg(&buff_list.position_d[self_idx]);
-            self_data.ev = __ldg(&buff_list.evaluated_velocity[self_idx]);
+            self_data.pos = __ldg(&buffers.position_d[self_idx]);
+            self_data.ev = __ldg(&buffers.evaluated_velocity[self_idx]);
             self_data.grad_color = make_float3(0.0f, 0.0f, 0.0f);
             self_data.lplc_color = 0.0f;
         }
 #endif
 
-#if FORCE_SMS_USE_REGISTER_PATH
-        // Register-load + warp-local shared exchange for different-cell tasks.
-        // (The isSame==1 shared-memory variant was removed: isSame is hard-wired to 0.)
+#if GSPH_USE_REGISTER_SMS
+        // Each warp owns one independent task and exchanges neighbor data only
+        // within its 32 lanes.
         {
-            bool warp_has_work = (bt.p_offset < cell_np);
-            __shared__ SimRegTaskIterator128 sdata;
-            __shared__ float4 shared_pos[SMS_BLOCK_THREADS];
-            __shared__ float4 shared_ev[SMS_BLOCK_THREADS];
-			int iterator_cell;
-			int iterator_offset;
-			int iterator_segment;
-            sdata.initialize(bt.xxi, bt.xxx, bt.yyi, bt.yyy, bt.zzi, bt.zzz,
-				cell_offset_M, cellpos, kDevSysPara.grid_size,
-				iterator_cell, iterator_offset, iterator_segment);
+            const bool warp_has_work = task.p_offset < cell_particle_count;
+            __shared__ SmsRegisterTaskIterator neighbor_iterator;
+            __shared__ float4 neighbor_positions[kSmsBlockThreads];
+            __shared__ float4 neighbor_velocities[kSmsBlockThreads];
+            int iterator_cell;
+            int iterator_offset;
+            int iterator_segment;
+            neighbor_iterator.initialize(
+                task.xxi, task.xxx, task.yyi, task.yyy, task.zzi, task.zzz,
+                micro_cell_offsets, cell_pos, kDevSysPara.grid_size,
+                iterator_cell, iterator_offset, iterator_segment);
 
             if (warp_has_work)
             {
                 while (true)
                 {
-                    const int task_lane = threadIdx.x % SMS_TASK_PARTICLES;
-#if SMS_TASK_PARTICLES == 32
-                    const unsigned int task_mask = 0xFFFFFFFFu;
-#else
-                    const int subgroup_start = ((threadIdx.x & 31) / SMS_TASK_PARTICLES) * SMS_TASK_PARTICLES;
-                    const unsigned int task_mask = ((1u << SMS_TASK_PARTICLES) - 1u) << subgroup_start;
-#endif
-                    int read_base = 0;
-                    int r = sdata.nextBatch(cell_offset_M, read_base,
-						iterator_cell, iterator_offset, iterator_segment);
-                    if (0 == r) break;
+                    const int task_lane = threadIdx.x & (kSmsTaskParticles - 1);
+                    int neighbor_begin = 0;
+                    int neighbor_count = neighbor_iterator.nextBatch(
+                        micro_cell_offsets, neighbor_begin,
+                        iterator_cell, iterator_offset, iterator_segment);
+                    if (neighbor_count == 0) break;
 
-					if (task_lane < r)
-					{
-						const int neighbor_idx = read_base + task_lane;
-						shared_pos[threadIdx.x] = __ldg(&buff_list.position_d[neighbor_idx]);
-						shared_ev[threadIdx.x] = __ldg(&buff_list.evaluated_velocity[neighbor_idx]);
-					}
-					const int task_base = threadIdx.x - task_lane;
-                    __syncwarp(task_mask);
-                    knComputeCellForceReg64(shared_pos, shared_ev, task_base,
-                                            &pres_kn, &vis_kn, &self_data, r);
-                    __syncwarp(task_mask);
+                    if (task_lane < neighbor_count)
+                    {
+                        const int neighbor_idx = neighbor_begin + task_lane;
+                        neighbor_positions[threadIdx.x] = __ldg(
+                            &buffers.position_d[neighbor_idx]);
+                        neighbor_velocities[threadIdx.x] = __ldg(
+                            &buffers.evaluated_velocity[neighbor_idx]);
+                    }
+                    const int task_base = threadIdx.x - task_lane;
+                    __syncwarp(kFullWarpMask);
+                    accumulateForceRegisterBatch(
+                        neighbor_positions, neighbor_velocities, task_base,
+                        &pressure_sum, &viscosity_sum, &self_data,
+                        neighbor_count);
+                    __syncwarp(kFullWarpMask);
                 }
             }
         }
 #else
         // Original shared-memory SMS path for both same-cell and different-cell tasks.
-        __shared__ SimForSharedData128 sdata;
-        sdata.initialize(bt.zzi, bt.zzz, bt.xxi, bt.xxx, cell_offset_M, isSame, cell_offset, cell_num, cellpos, kDevSysPara.grid_size);
+        constexpr int is_same = 0;
+        __shared__ SimForSharedData128 shared_data;
+        shared_data.initialize(task.zzi, task.zzz, task.xxi, task.xxx,
+                               micro_cell_offsets, is_same, cell_offsets, cell_particle_counts,
+                               cell_pos, kDevSysPara.grid_size);
         while (true)
         {
             __syncthreads();
-            int r = sdata.read32Data(cell_offset_M, isSame, buff_list);
+            int neighbor_count = shared_data.read32Data(
+                micro_cell_offsets, is_same, buffers);
             __syncthreads();
-            if (0 == r) break;
+            if (neighbor_count == 0) break;
             if (active)
             {
-                knComputeCellForceSMS64(isSame, &pres_kn, &vis_kn, &sdata, &self_data, r);
+                knComputeCellForceSMS64(
+                    is_same, &pressure_sum, &viscosity_sum,
+                    &shared_data, &self_data, neighbor_count);
             }
         }
 #endif
 
         if (active)
         {
-            register float3 total_force = pres_kn * kDevSysPara.spiky_value / 2 + vis_kn * kDevSysPara.viscosity * kDevSysPara.visco_value;
+            float3 total_force = pressure_sum * kDevSysPara.spiky_value / 2
+                + viscosity_sum * kDevSysPara.viscosity * kDevSysPara.visco_value;
 
             self_data.grad_color *= kDevSysPara.grad_poly6 * kDevSysPara.mass;
             self_data.lplc_color *= kDevSysPara.lplc_poly6 * kDevSysPara.mass;
 
-            self_data.lplc_color = self_data.lplc_color * self_data.pos.w;  // pos.w holds 1/density (loaded from position_d)
-            float sur_nor_sq = self_data.grad_color.x * self_data.grad_color.x +
-                               self_data.grad_color.y * self_data.grad_color.y +
-                               self_data.grad_color.z * self_data.grad_color.z;
-            float inv_sur_nor = rsqrtf(sur_nor_sq);
-            float sur_nor = sur_nor_sq * inv_sur_nor;
-            // buff_list.surface_normal_vector[self_idx] = sur_nor;
+            // position_d.w, loaded into self_data.pos.w, stores 1/density.
+            self_data.lplc_color *= self_data.pos.w;
+            float surface_normal_squared =
+                self_data.grad_color.x * self_data.grad_color.x
+                + self_data.grad_color.y * self_data.grad_color.y
+                + self_data.grad_color.z * self_data.grad_color.z;
+            float inverse_surface_normal = rsqrtf(surface_normal_squared);
+            float surface_normal =
+                surface_normal_squared * inverse_surface_normal;
 
-            float3 force;
-            if (sur_nor > kDevSysPara.surface_normal)
+            float3 surface_force;
+            if (surface_normal > kDevSysPara.surface_normal)
             {
-                force = self_data.grad_color * (kDevSysPara.surface_coe * self_data.lplc_color * inv_sur_nor);
+                surface_force = self_data.grad_color
+                    * (kDevSysPara.surface_coe * self_data.lplc_color
+                       * inverse_surface_normal);
             }
             else
             {
-                force = make_float3(0.0f, 0.0f, 0.0f);
+                surface_force = make_float3(0.0f, 0.0f, 0.0f);
             }
 
             total_force *= kDevSysPara.mass;
-            buff_list.acceleration[self_idx] = total_force + force;
+            buffers.acceleration[self_idx] = total_force + surface_force;
         }
     }
 }
 
-void launchForceHybrid128n(int number_blocks, bool sms_only,
-    int *cell_offset_M, ParticleIdxRange range, ParticleBufferList buff_list,
-    int *cindex, int *cell_offset, int *cell_num, BlockTask *block_task,
-    const int *d_num_block, const int *d_middle)
+void launchForceHybridKernel(
+    int block_count, bool sms_only, int *micro_cell_offsets,
+    ParticleIdxRange tra_range, ParticleBufferList buffers,
+    int *compact_indices, int *cell_offsets, int *cell_particle_counts,
+    const BlockTask *block_tasks, const int *device_sms_task_count,
+    const int *device_middle)
 {
     if (sms_only)
     {
-        kncomputeForceHybrid128nImpl<true><<<number_blocks, SMS_BLOCK_THREADS>>>(
-            cell_offset_M, range, buff_list, cindex, cell_offset, cell_num,
-            block_task, d_num_block, d_middle);
+        computeForceHybridKernel<true><<<block_count, kSmsBlockThreads>>>(
+            micro_cell_offsets, tra_range, buffers, compact_indices,
+            cell_offsets, cell_particle_counts, block_tasks,
+            device_sms_task_count, device_middle);
     }
     else
     {
-        kncomputeForceHybrid128nImpl<false><<<number_blocks, SMS_BLOCK_THREADS>>>(
-            cell_offset_M, range, buff_list, cindex, cell_offset, cell_num,
-            block_task, d_num_block, d_middle);
+        computeForceHybridKernel<false><<<block_count, kSmsBlockThreads>>>(
+            micro_cell_offsets, tra_range, buffers, compact_indices,
+            cell_offsets, cell_particle_counts, block_tasks,
+            device_sms_task_count, device_middle);
     }
 }
 }
