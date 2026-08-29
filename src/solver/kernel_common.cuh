@@ -703,6 +703,187 @@ private:
 	char iminz[rate];
 	char imaxz[rate];
 };
+
+// Warp-local metadata and traversal state for the optimized SMS path.  It
+// applies the task's x/y/z micro-cell bounds without shared iterator state.
+class SimRegTaskIterator128
+{
+public:
+    __device__ __forceinline__ void initialize(
+        int minx, int maxx, int miny, int maxy, int minz, int maxz,
+        int *celloffM, const ushort3 &cell_pos, const ushort3 &grid_size,
+        int& iterator_cell, int& iterator_offset, int& iterator_segment)
+    {
+        const int task_lane = threadIdx.x % SMS_TASK_PARTICLES;
+        const int task_in_block = threadIdx.x / SMS_TASK_PARTICLES;
+        const int metadata_base = task_in_block * 9;
+
+        for (int task_slot = task_lane; task_slot < 9; task_slot += SMS_TASK_PARTICLES)
+        {
+            const int y_offset = task_slot % 3 - 1;
+            const int z_offset = task_slot / 3 - 1;
+            ushort3 neighbor_pos = cell_pos + make_ushort3(-1, y_offset, z_offset);
+            int left_id = CellPos2CellIdx(neighbor_pos, grid_size);
+            ++neighbor_pos.x;
+            int middle_id = CellPos2CellIdx(neighbor_pos, grid_size);
+            ++neighbor_pos.x;
+            int right_id = CellPos2CellIdx(neighbor_pos, grid_size);
+            const int metadata_index = metadata_base + task_slot;
+
+            if (middle_id == kInvalidCellIdx)
+            {
+                micro_begin_[metadata_index] = 0;
+                particle_count_[metadata_index] = 0;
+                x_count_[metadata_index] = 0;
+                z_begin_[metadata_index] = 0;
+                z_count_[metadata_index] = 0;
+                y_begin_[metadata_index] = 0;
+                y_count_[metadata_index] = 0;
+                segmented_[metadata_index] = 0;
+            }
+            else
+            {
+                const int left_count = left_id == kInvalidCellIdx ? 0 : 4 - minx;
+                const int right_count = right_id == kInvalidCellIdx ? 0 : maxx + 1;
+                const int x_count = left_count + 4 + right_count;
+                const int micro_begin = left_id == kInvalidCellIdx
+                    ? (middle_id << 6)
+                    : (left_id << 6) + (minx << 4);
+
+                const int y_begin = y_offset < 0 ? miny : 0;
+                const int y_end = y_offset > 0 ? maxy : 3;
+                const int z_begin = z_offset < 0 ? minz : 0;
+                const int z_end = z_offset > 0 ? maxz : 3;
+
+                micro_begin_[metadata_index] = micro_begin;
+                particle_count_[metadata_index] =
+                    __ldg(&celloffM[micro_begin + (x_count << 4)]) -
+                    __ldg(&celloffM[micro_begin]);
+                x_count_[metadata_index] = static_cast<unsigned char>(x_count);
+                z_begin_[metadata_index] = static_cast<unsigned char>(z_begin);
+                z_count_[metadata_index] = static_cast<unsigned char>(z_end - z_begin + 1);
+                y_begin_[metadata_index] = static_cast<unsigned char>(y_begin);
+                y_count_[metadata_index] = static_cast<unsigned char>(y_end - y_begin + 1);
+                segmented_[metadata_index] =
+                    static_cast<unsigned char>(y_begin != 0 || y_end != 3 || z_begin != 0 || z_end != 3);
+            }
+        }
+
+        iterator_cell = metadata_base;
+        iterator_offset = 0;
+        iterator_segment = 0;
+#if SMS_TASK_PARTICLES == 32
+        __syncwarp(0xFFFFFFFFu);
+#else
+        const int subgroup_start = ((threadIdx.x & 31) / SMS_TASK_PARTICLES) * SMS_TASK_PARTICLES;
+        const unsigned int subgroup_mask = ((1u << SMS_TASK_PARTICLES) - 1u) << subgroup_start;
+        __syncwarp(subgroup_mask);
+#endif
+    }
+
+    __device__ __forceinline__ int nextBatch(
+        int *celloffM, int& read_base,
+        int& iterator_cell, int& iterator_offset, int& iterator_segment)
+    {
+        const int metadata_end = (threadIdx.x / SMS_TASK_PARTICLES + 1) * 9;
+
+        while (iterator_cell < metadata_end)
+        {
+            const int total_count = particle_count_[iterator_cell];
+            if (total_count <= 0)
+            {
+                ++iterator_cell;
+                iterator_offset = 0;
+                iterator_segment = 0;
+                continue;
+            }
+
+            const int micro_begin = micro_begin_[iterator_cell];
+            if (segmented_[iterator_cell] == 0)
+            {
+                const int remaining = total_count - iterator_offset;
+                const int read_count = remaining > SMS_TASK_PARTICLES ? SMS_TASK_PARTICLES : remaining;
+                read_base = __ldg(&celloffM[micro_begin]) + iterator_offset;
+                if (remaining > SMS_TASK_PARTICLES)
+                {
+                    iterator_offset += SMS_TASK_PARTICLES;
+                }
+                else
+                {
+                    ++iterator_cell;
+                    iterator_offset = 0;
+                    iterator_segment = 0;
+                }
+                return read_count;
+            }
+
+            const int x_count = x_count_[iterator_cell];
+            const int z_begin = z_begin_[iterator_cell];
+            const int z_count = z_count_[iterator_cell];
+            const int y_begin = y_begin_[iterator_cell];
+            const int y_count = y_count_[iterator_cell];
+            const bool full_y = y_count == 4;
+            const int segment_count = x_count * (full_y ? 1 : z_count);
+
+            while (iterator_segment < segment_count)
+            {
+                int segment_begin;
+                int segment_end;
+                if (full_y)
+                {
+                    segment_begin = micro_begin + (iterator_segment << 4) + (z_begin << 2);
+                    segment_end = segment_begin + (z_count << 2);
+                }
+                else
+                {
+                    const int x_layer = iterator_segment / z_count;
+                    const int z_layer = z_begin + iterator_segment - x_layer * z_count;
+                    segment_begin = micro_begin + (x_layer << 4) + (z_layer << 2) + y_begin;
+                    segment_end = segment_begin + y_count;
+                }
+
+                const int particle_begin = __ldg(&celloffM[segment_begin]);
+                const int segment_particles = __ldg(&celloffM[segment_end]) - particle_begin;
+                const int remaining = segment_particles - iterator_offset;
+                if (remaining <= 0)
+                {
+                    ++iterator_segment;
+                    iterator_offset = 0;
+                    continue;
+                }
+
+                const int read_count = remaining > SMS_TASK_PARTICLES ? SMS_TASK_PARTICLES : remaining;
+                read_base = particle_begin + iterator_offset;
+                if (remaining > SMS_TASK_PARTICLES)
+                {
+                    iterator_offset += SMS_TASK_PARTICLES;
+                }
+                else
+                {
+                    ++iterator_segment;
+                    iterator_offset = 0;
+                }
+                return read_count;
+            }
+            ++iterator_cell;
+            iterator_offset = 0;
+            iterator_segment = 0;
+        }
+
+        return 0;
+    }
+
+private:
+    int micro_begin_[9 * SMS_TASKS_PER_BLOCK];
+    int particle_count_[9 * SMS_TASKS_PER_BLOCK];
+    unsigned char x_count_[9 * SMS_TASKS_PER_BLOCK];
+    unsigned char z_begin_[9 * SMS_TASKS_PER_BLOCK];
+    unsigned char z_count_[9 * SMS_TASKS_PER_BLOCK];
+    unsigned char y_begin_[9 * SMS_TASKS_PER_BLOCK];
+    unsigned char y_count_[9 * SMS_TASKS_PER_BLOCK];
+    unsigned char segmented_[9 * SMS_TASKS_PER_BLOCK];
+};
+
 class SimForSharedData
 {
 public:

@@ -11,6 +11,7 @@
 #include "simulation/sph_hybrid_system.h"
 #include <math.h>
 #include <fstream>
+#include <iomanip>
 #include <sstream>
 #include <vector>
 #include <GL/freeglut.h>
@@ -381,10 +382,42 @@ void HybridSystem::runBenchmark(int frames)
                                            : total_kernel / warmup_frames;
     double fps = 1000.0 / avg_frame;
 
+    // Deterministic aggregate for register/shared numerical A/B checks.  The
+    // copy and host reduction happen after the measured interval.
+    ParticleBufferList host_list = host_buff_.get_buff_list();
+    ParticleBufferList device_list = device_buff_.get_buff_list();
+    CUDA_SAFE_CALL(cudaMemcpy(host_list.position_d, device_list.position_d,
+                              static_cast<size_t>(nump_) * sizeof(float4),
+                              cudaMemcpyDeviceToHost));
+    double position_sum_x = 0.0;
+    double position_sum_y = 0.0;
+    double position_sum_z = 0.0;
+    double density_reciprocal_sum = 0.0;
+    double weighted_position_sum = 0.0;
+    for (uint i = 0; i < nump_; ++i)
+    {
+        const float4 pos = host_list.position_d[i];
+        position_sum_x += pos.x;
+        position_sum_y += pos.y;
+        position_sum_z += pos.z;
+        density_reciprocal_sum += pos.w;
+        weighted_position_sum += static_cast<double>((i & 1023u) + 1u)
+            * (pos.x + 3.0 * pos.y + 7.0 * pos.z);
+    }
+
     std::cout << "\n========== Headless benchmark (" << measured_frames << " measured + " << warmup_frames << " warm-up frames) ==========\n";
     std::cout << "Total wall time: " << elapsed_ms << " ms\n";
     std::cout << "Average frame time: " << avg_frame << " ms\n";
     std::cout << "FPS: " << fps << "\n";
+    std::cout << std::setprecision(17);
+    std::cout << "State checksum: " << position_sum_x << ", "
+              << position_sum_y << ", " << position_sum_z << ", "
+              << density_reciprocal_sum << ", "
+              << weighted_position_sum << "\n";
+    std::cout << std::setprecision(6);
+    std::cout << "Hybrid split: " << arrangement_->getMiddleValue()
+              << " TRA particles, " << arrangement_->getNumBlockSMSMode()
+              << " SMS tasks\n";
     std::cout << "Per-stage averages (CUDA events, warm-up frames):\n";
     std::cout << "  arrange/grid : " << (total_arrange / warmup_frames) << " ms\n";
     std::cout << "  density      : " << (total_density / warmup_frames) << " ms\n";

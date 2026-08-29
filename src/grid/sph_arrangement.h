@@ -90,7 +90,9 @@ private:
 
     void CSInsertParticles();
     void CSCountingSortFull();
-	void arrangeBlockTasksFixedM(int *hash, int *celloff, int *cellnum, BlockTask* d_task_array, int* d_cta_reqs, int* d_task_array_offset, int cta_size);
+	void arrangeBlockTasksFixedM(int *hash, int *celloff, int *cellnum,
+        BlockTask* d_task_array, int* d_cta_reqs,
+        int* d_task_array_offset, int cta_size);
     void arrangeBlockTasksFixed(BlockTask* d_task_array, int* d_cta_reqs, int* d_task_array_offset, int cta_size);
     void arrangeBlockTasksFloat();
 

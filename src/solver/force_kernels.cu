@@ -253,12 +253,9 @@ void knComputeCellForceReg64(float4 *shared_pos, float4 *shared_ev, int warp_bas
                              float3 *pres_kn, float3 *vis_kn,
                              CFData *self_data, int read_num)
 {
-    // Ensure the loop bound is uniform across the warp.
-    read_num = __shfl_sync(0xFFFFFFFF, read_num, 0);
     for (int i = warp_base; i < warp_base + read_num; ++i)
     {
         float4 neighbor_position = shared_pos[i];
-        float4 neighbor_ev = shared_ev[i];
         float3 rel_pos = cal_rePos(neighbor_position, self_data->pos);
 
         float dis_2 = rel_pos.x * rel_pos.x + rel_pos.y * rel_pos.y + rel_pos.z * rel_pos.z;
@@ -266,25 +263,28 @@ void knComputeCellForceReg64(float4 *shared_pos, float4 *shared_ev, int warp_bas
         if (kDevSysPara.kernel_2 < dis_2 || kFloatSmall > dis_2)
             continue;
 
+        float4 neighbor_ev = shared_ev[i];
         float inv_dis = rsqrtf(dis_2);
         float dis = dis_2 * inv_dis;
         float V = neighbor_position.w;  // position_d.w stores 1/density
         float kernel_r = kDevSysPara.kernel - dis;
+        float weighted_kernel_r = V * kernel_r;
 
         // pressure force
-        float temp_pres_kn = V * (self_data->ev.w + neighbor_ev.w) * kernel_r * kernel_r;
+        float temp_pres_kn = weighted_kernel_r
+            * (self_data->ev.w + neighbor_ev.w) * kernel_r;
         *pres_kn -= rel_pos * (temp_pres_kn * inv_dis);
 
         // viscosity force
         float3 rel_vel = cal_rePos(self_data->ev, neighbor_ev);
-        float temp_vis_kn = V * kernel_r;
-        *vis_kn += rel_vel * temp_vis_kn;
+        *vis_kn += rel_vel * weighted_kernel_r;
 
         // surface force
-        float temp = V * powf_2(kDevSysPara.kernel_2 - dis_2);
+        float h2_r2 = kDevSysPara.kernel_2 - dis_2;
+        float weighted_h2 = V * h2_r2;
+        float temp = weighted_h2 * h2_r2;
         self_data->grad_color += rel_pos * temp;
-        self_data->lplc_color += V * (kDevSysPara.kernel_2 - dis_2) *
-            (dis_2 - 0.75f * (kDevSysPara.kernel_2 - dis_2));
+        self_data->lplc_color += weighted_h2 * (dis_2 - 0.75f * h2_r2);
     }
 }
 #endif
@@ -577,16 +577,20 @@ void knComputeOtherForceHybrid128n(ParticleIdxRange range, ParticleBufferList bu
 {
 
 }
-__global__ __launch_bounds__(64, 10)
-void kncomputeForceHybrid128n(int *cell_offset_M,ParticleIdxRange range, ParticleBufferList buff_list, int *cindex, int *cell_offset, int *cell_num, BlockTask *block_task, const int *d_num_block, const int *d_middle)
+template <bool SmsOnly>
+__global__ __launch_bounds__(SMS_BLOCK_THREADS, SMS_MIN_BLOCKS_PER_SM)
+void kncomputeForceHybrid128nImpl(int *cell_offset_M,ParticleIdxRange range, ParticleBufferList buff_list, int *cindex, int *cell_offset, int *cell_num, BlockTask *block_task, const int *d_num_block, const int *d_middle)
 {
-    // Device-side TRA/SMS split: the host over-provisions the grid and excess
-    // blocks exit immediately, so the frame needs no host readback/synchronization.
-    int middle = __ldg(d_middle);
-    if (middle < 0 || middle > range.end) middle = range.end;
-    const int bt_offset = (middle - range.begin + 63) >> 6;  // ceil((middle - begin) / 64)
+    int bt_offset = 0;
+    if constexpr (!SmsOnly)
+    {
+        // Device-side TRA/SMS split: the host over-provisions the grid and excess
+        // blocks exit immediately, so the frame needs no host readback/synchronization.
+        int middle = __ldg(d_middle);
+        if (middle < 0 || middle > range.end) middle = range.end;
+        bt_offset = ceil_int(middle - range.begin, SMS_BLOCK_THREADS);
 
-    if (blockIdx.x < bt_offset){
+        if (blockIdx.x < bt_offset){
         int self_idx = threadIdx.x + __umul24(blockIdx.x, blockDim.x) + range.begin;
         if (self_idx >= middle) return;
         self_idx = __ldg(&cindex[self_idx]);
@@ -689,12 +693,14 @@ void kncomputeForceHybrid128n(int *cell_offset_M,ParticleIdxRange range, Particl
 
 		
 		//buff_list.color
+            return;
+        }
     }
-    else{
+    {
 
         int t = blockIdx.x - bt_offset;
-        if ((t << 1) >= __ldg(d_num_block)) return;  // over-provisioned SMS block (block-uniform exit)
-		int n = (t<<1) + (threadIdx.x>>5);
+        if (t * SMS_TASKS_PER_BLOCK >= __ldg(d_num_block)) return;  // over-provisioned SMS block (block-uniform exit)
+		int n = t * SMS_TASKS_PER_BLOCK + threadIdx.x / SMS_TASK_PARTICLES;
 		BlockTask bt = block_task[n];
         int isSame = 0;// bt.isSame;
 
@@ -708,15 +714,24 @@ void kncomputeForceHybrid128n(int *cell_offset_M,ParticleIdxRange range, Particl
 
         register int cell_off = __ldg(&cell_offset[cell_id]);
         register int cell_np = __ldg(&cell_num[cell_id]);
-        register int self_idx = cell_off + bt.p_offset + threadIdx.x % 32; //__mul24(bt.sub_idx, blockDim.x) + threadIdx.x;
+        register int self_idx = cell_off + bt.p_offset + threadIdx.x % SMS_TASK_PARTICLES;
 
         register int temp_cell_end = cell_off + cell_np;
+        bool active = (self_idx < temp_cell_end);
 
         register float3 pres_kn = make_float3(0.0f, 0.0f, 0.0f);
         register float3 vis_kn = make_float3(0.0f, 0.0f, 0.0f);
         register CFData self_data;
 
-        bool active = (self_idx < temp_cell_end);
+#if FORCE_SMS_USE_REGISTER_PATH
+        // Keep the warp-uniform inner loop branch-free while making inactive
+        // tail lanes well-defined. Their accumulated result is discarded.
+        const int safe_self_idx = active ? self_idx : temp_cell_end - 1;
+        self_data.pos = __ldg(&buff_list.position_d[safe_self_idx]);
+        self_data.ev = __ldg(&buff_list.evaluated_velocity[safe_self_idx]);
+        self_data.grad_color = make_float3(0.0f, 0.0f, 0.0f);
+        self_data.lplc_color = 0.0f;
+#else
         if (active)   // init self data
         {
             self_data.pos = __ldg(&buff_list.position_d[self_idx]);
@@ -724,36 +739,50 @@ void kncomputeForceHybrid128n(int *cell_offset_M,ParticleIdxRange range, Particl
             self_data.grad_color = make_float3(0.0f, 0.0f, 0.0f);
             self_data.lplc_color = 0.0f;
         }
+#endif
 
 #if FORCE_SMS_USE_REGISTER_PATH
         // Register-load + warp-local shared exchange for different-cell tasks.
         // (The isSame==1 shared-memory variant was removed: isSame is hard-wired to 0.)
         {
             bool warp_has_work = (bt.p_offset < cell_np);
-            __shared__ SimForRegData128 sdata;
-            __shared__ float4 shared_pos[64];
-            __shared__ float4 shared_ev[64];
-            sdata.initialize(bt.zzi, bt.zzz, bt.xxi, bt.xxx, cell_offset_M, isSame, cell_offset, cell_num, cellpos, kDevSysPara.grid_size);
+            __shared__ SimRegTaskIterator128 sdata;
+            __shared__ float4 shared_pos[SMS_BLOCK_THREADS];
+            __shared__ float4 shared_ev[SMS_BLOCK_THREADS];
+			int iterator_cell;
+			int iterator_offset;
+			int iterator_segment;
+            sdata.initialize(bt.xxi, bt.xxx, bt.yyi, bt.yyy, bt.zzi, bt.zzz,
+				cell_offset_M, cellpos, kDevSysPara.grid_size,
+				iterator_cell, iterator_offset, iterator_segment);
 
             if (warp_has_work)
             {
                 while (true)
                 {
-                    float4 my_pos = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-                    float4 my_ev = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-                    int r = sdata.read32DataReg(cell_offset_M, isSame, buff_list, my_pos, my_ev);
+                    const int task_lane = threadIdx.x % SMS_TASK_PARTICLES;
+#if SMS_TASK_PARTICLES == 32
+                    const unsigned int task_mask = 0xFFFFFFFFu;
+#else
+                    const int subgroup_start = ((threadIdx.x & 31) / SMS_TASK_PARTICLES) * SMS_TASK_PARTICLES;
+                    const unsigned int task_mask = ((1u << SMS_TASK_PARTICLES) - 1u) << subgroup_start;
+#endif
+                    int read_base = 0;
+                    int r = sdata.nextBatch(cell_offset_M, read_base,
+						iterator_cell, iterator_offset, iterator_segment);
                     if (0 == r) break;
 
-                    shared_pos[threadIdx.x] = my_pos;
-                    shared_ev[threadIdx.x] = my_ev;
-                    __syncwarp();
-
-                    // Call the helper from every lane in the warp.  It uses
-                    // __shfl_sync internally, so all 32 lanes must participate.
-                    int warp_base = (threadIdx.x >> 5) << 5;
-                    knComputeCellForceReg64(shared_pos, shared_ev, warp_base,
+					if (task_lane < r)
+					{
+						const int neighbor_idx = read_base + task_lane;
+						shared_pos[threadIdx.x] = __ldg(&buff_list.position_d[neighbor_idx]);
+						shared_ev[threadIdx.x] = __ldg(&buff_list.evaluated_velocity[neighbor_idx]);
+					}
+					const int task_base = threadIdx.x - task_lane;
+                    __syncwarp(task_mask);
+                    knComputeCellForceReg64(shared_pos, shared_ev, task_base,
                                             &pres_kn, &vis_kn, &self_data, r);
-                    __syncwarp();
+                    __syncwarp(task_mask);
                 }
             }
         }
@@ -774,7 +803,7 @@ void kncomputeForceHybrid128n(int *cell_offset_M,ParticleIdxRange range, Particl
         }
 #endif
 
-        if (self_idx < temp_cell_end)
+        if (active)
         {
             register float3 total_force = pres_kn * kDevSysPara.spiky_value / 2 + vis_kn * kDevSysPara.viscosity * kDevSysPara.visco_value;
 
@@ -802,6 +831,25 @@ void kncomputeForceHybrid128n(int *cell_offset_M,ParticleIdxRange range, Particl
             total_force *= kDevSysPara.mass;
             buff_list.acceleration[self_idx] = total_force + force;
         }
+    }
+}
+
+void launchForceHybrid128n(int number_blocks, bool sms_only,
+    int *cell_offset_M, ParticleIdxRange range, ParticleBufferList buff_list,
+    int *cindex, int *cell_offset, int *cell_num, BlockTask *block_task,
+    const int *d_num_block, const int *d_middle)
+{
+    if (sms_only)
+    {
+        kncomputeForceHybrid128nImpl<true><<<number_blocks, SMS_BLOCK_THREADS>>>(
+            cell_offset_M, range, buff_list, cindex, cell_offset, cell_num,
+            block_task, d_num_block, d_middle);
+    }
+    else
+    {
+        kncomputeForceHybrid128nImpl<false><<<number_blocks, SMS_BLOCK_THREADS>>>(
+            cell_offset_M, range, buff_list, cindex, cell_offset, cell_num,
+            block_task, d_num_block, d_middle);
     }
 }
 }

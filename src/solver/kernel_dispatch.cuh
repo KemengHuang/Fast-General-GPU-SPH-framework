@@ -18,6 +18,7 @@ namespace sph
 
 
 
+
 void BuffInit(ParticleBufferList buff_list_n, int nm);
 
 void transSysParaToDevice(const SystemParameter *host_para);

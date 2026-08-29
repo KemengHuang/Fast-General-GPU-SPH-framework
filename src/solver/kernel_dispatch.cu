@@ -164,7 +164,7 @@ void computeOtherForceHybrid128(ParticleIdxRange range, ParticleBufferList buff_
     int bt_offset = 0;
     int number_blocks = ceil_int(num_block, 2);
     if (total_thread > 0){
-        bt_offset = ceil_int(total_thread, 64);
+        bt_offset = ceil_int(total_thread, SMS_BLOCK_THREADS);
         number_blocks += bt_offset;
     }
     if (number_blocks <= 0) return;
@@ -179,45 +179,45 @@ void computeOtherForceHybrid128(ParticleIdxRange range, ParticleBufferList buff_
 void computeDensityHybrid128n(int *cell_offset_M, ParticleIdxRange range, ParticleBufferList buff_list_n, int* cindex, int *cell_offset, int *cell_num, BlockTask *block_task, int num_block, const int *d_num_block, const int *d_middle, int sms_task_bound){
 
     int total_thread = range.end - range.begin;
-    int num_thread = 64;
+    int num_thread = SMS_BLOCK_THREADS;
 #if HYBRID_DEVICE_GRID_SIZING
     // Over-provision the grid; the kernel reads the TRA/SMS split and the SMS task
     // count from device memory and excess blocks exit immediately.
     (void)num_block;
-    int number_blocks = ceil_int(total_thread, num_thread) + ceil_int(sms_task_bound, 2);
+    int number_blocks = ceil_int(total_thread, num_thread) + ceil_int(sms_task_bound, SMS_TASKS_PER_BLOCK);
     if (number_blocks <= 0) return;
-	kncomputeDensityHybrid128n << <number_blocks, num_thread >> >(cell_offset_M, range, buff_list_n, cindex, cell_offset, cell_num, block_task, d_num_block, d_middle);
+	launchDensityHybrid128n(number_blocks, false, cell_offset_M, range, buff_list_n, cindex, cell_offset, cell_num, block_task, d_num_block, d_middle);
 #else
     int bt_offset = 0;
-    int number_blocks = ceil_int(num_block, 2);
+    int number_blocks = ceil_int(num_block, SMS_TASKS_PER_BLOCK);
     if (total_thread > 0){
-        bt_offset = ceil_int(total_thread, 64);
+        bt_offset = ceil_int(total_thread, SMS_BLOCK_THREADS);
         number_blocks += bt_offset;
     }
     if (number_blocks <= 0) return;
-	kncomputeDensityHybrid128n << <number_blocks, num_thread >> >(cell_offset_M, range, buff_list_n, cindex, cell_offset, cell_num, block_task, d_num_block, d_middle);
+	launchDensityHybrid128n(number_blocks, total_thread == 0, cell_offset_M, range, buff_list_n, cindex, cell_offset, cell_num, block_task, d_num_block, d_middle);
 #endif
 }
 
 void computeForceHybrid128n(int *cell_offset_M, ParticleIdxRange range, ParticleBufferList buff_list_n, int* cindex, int *cell_offset, int *cell_num, BlockTask *block_task, int num_block, const int *d_num_block, const int *d_middle, int sms_task_bound){
     int total_thread = range.end - range.begin;
-    int num_thread = 64;
+    int num_thread = SMS_BLOCK_THREADS;
 #if HYBRID_DEVICE_GRID_SIZING
     // Over-provision the grid; the kernel reads the TRA/SMS split and the SMS task
     // count from device memory and excess blocks exit immediately.
     (void)num_block;
-    int number_blocks = ceil_int(total_thread, num_thread) + ceil_int(sms_task_bound, 2);
+    int number_blocks = ceil_int(total_thread, num_thread) + ceil_int(sms_task_bound, SMS_TASKS_PER_BLOCK);
     if (number_blocks <= 0) return;
-	kncomputeForceHybrid128n << <number_blocks, num_thread >> >(cell_offset_M, range, buff_list_n, cindex, cell_offset, cell_num, block_task, d_num_block, d_middle);
+	launchForceHybrid128n(number_blocks, false, cell_offset_M, range, buff_list_n, cindex, cell_offset, cell_num, block_task, d_num_block, d_middle);
 #else
     int bt_offset = 0;
-    int number_blocks = ceil_int(num_block, 2);
+    int number_blocks = ceil_int(num_block, SMS_TASKS_PER_BLOCK);
     if (total_thread > 0){
-        bt_offset = ceil_int(total_thread, 64);
+        bt_offset = ceil_int(total_thread, SMS_BLOCK_THREADS);
         number_blocks += bt_offset;
     }
     if (number_blocks <= 0) return;
-	kncomputeForceHybrid128n << <number_blocks, num_thread >> >(cell_offset_M,range, buff_list_n, cindex, cell_offset, cell_num, block_task, d_num_block, d_middle);
+	launchForceHybrid128n(number_blocks, total_thread == 0, cell_offset_M,range, buff_list_n, cindex, cell_offset, cell_num, block_task, d_num_block, d_middle);
 #endif
 }
 

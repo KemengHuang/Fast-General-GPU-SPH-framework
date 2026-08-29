@@ -162,7 +162,15 @@ void knCalculateBlockRequirementHybridMode(int *cell_type, int *d_cell_num, int 
     
 
 //    block_req[idx] = nump_self < 15 ? 0 : (nump_self + 25) >> 5;
-    if (totaln < 96 && nump_self < 15){ block_req[idx] = 0; }else if (totaln < 60){ block_req[idx] = (nump_self + 27) >> 5; }else{ block_req[idx] = (nump_self + 31) >> 5; }
+    if (totaln < 96 && nump_self < 15) {
+        block_req[idx] = 0;
+    }
+    else if (totaln < 60) {
+        block_req[idx] = (nump_self + block_size - 5) / block_size;
+    }
+    else {
+        block_req[idx] = ceil_int(nump_self, block_size);
+    }
 //    if (totaln < 60){block_req[idx] = (nump_self + 25) >> 5;}else if (totaln < 95 && nump_self < 19){block_req[idx] = 0;}else{block_req[idx] = (nump_self + 31) >> 5;}
 //    block_req[idx] = (totaln < 95) ? 0 : (nump_self + 31) >> 5;
 //    block_req[idx] = 0;// (nump_self + 31) >> 5;

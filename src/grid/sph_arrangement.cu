@@ -93,7 +93,7 @@ __global__ void CountingSort_Cell_Sum_two_M(int* hashp, int *p_offset, int *hash
 		//selfHash = block_reqs[selfHash] > 0 ? (selfHash + numc) : selfHash;
 
 
-		selfHash = block_reqs[selfHash] <<5 > p_offset[x_id] ? (selfHash + numc) : selfHash;
+		selfHash = block_reqs[selfHash] * SMS_TASK_PARTICLES > p_offset[x_id] ? (selfHash + numc) : selfHash;
 		/*   int thd = block_reqs[selfHash] * 32;
 		if (thd <= p_offset[x_id]){
 		selfHash = selfHash;
@@ -629,7 +629,8 @@ Arrangement::Arrangement(ParticleBufferObject &buff_list, ParticleBufferObject &
     CUDA_SAFE_CALL(cudaMalloc(&cell_type, numc_ * sizeof(int)));
 
 
-    CUDA_SAFE_CALL(cudaMalloc(&d_block_task_, numc_ * 10 * sizeof(BlockTask)));
+	const size_t task_capacity = ceil_int(static_cast<int>(nump_capacity_), SMS_TASK_PARTICLES) + numc_ + SMS_TASKS_PER_BLOCK;
+	CUDA_SAFE_CALL(cudaMalloc(&d_block_task_, task_capacity * sizeof(BlockTask)));
     CUDA_SAFE_CALL(cudaMalloc(&d_num_block_, sizeof(int)));
 
     CUDA_SAFE_CALL(cudaMalloc(&d_middle_value_, sizeof(int)));
@@ -841,7 +842,9 @@ void knArrangeTasksFixed(BlockTask *block_tasks, int *num_block, int *block_reqs
     }
 }
 __global__
-void knArrangeTasksFixedM(int *hash, int* celloff, int *cellnum, BlockTask *block_tasks, int *num_block, int *block_reqs, int *breqs_offset, ushort3 grid_size, int cta_size, int numc) {
+void knArrangeTasksFixedM(int *hash, int* celloff, int *cellnum,
+    BlockTask *block_tasks, int *num_block, int *block_reqs,
+    int *breqs_offset, ushort3 grid_size, int cta_size, int numc) {
 	unsigned int idx = threadIdx.x + __umul24(blockDim.x, blockIdx.x);
 
 	if (idx >= numc) return;
@@ -856,6 +859,7 @@ void knArrangeTasksFixedM(int *hash, int* celloff, int *cellnum, BlockTask *bloc
 		int hashA = hash[start + p_offset];
 		int xxi = ((hashA & 0x030) >> 4);
 		int zzi = ((hashA & 0x0c) >> 2);
+		int yyi = (hashA & 0x03);
 		BlockTask bt;
 	//	bt.cell_pos = cell_pos;
 		bt.p_offset = p_offset;
@@ -872,6 +876,7 @@ void knArrangeTasksFixedM(int *hash, int* celloff, int *cellnum, BlockTask *bloc
 		}
 		int xxx = ((hashB & 0x030) >> 4);
 		int zzz = ((hashB & 0x0c) >> 2);
+		int yyy = (hashB & 0x03);
 		//bt.isSame &= 0x0;
 		bt.xxi = xxi;
 		bt.xxx = xxx;
@@ -879,10 +884,20 @@ void knArrangeTasksFixedM(int *hash, int* celloff, int *cellnum, BlockTask *bloc
 		if (xxi == xxx){
 			bt.zzi = zzi;
 			bt.zzz = zzz;
+			if (zzi == zzz) {
+				bt.yyi = yyi;
+				bt.yyy = yyy;
+			}
+			else {
+				bt.yyi = 0;
+				bt.yyy = 3;
+			}
 		}
 		else{
 			bt.zzi = 0;
 			bt.zzz = 3;
+			bt.yyi = 0;
+			bt.yyy = 3;
 		}
 		block_tasks[i] = bt;
 	}
@@ -897,6 +912,7 @@ void judgeTask(BlockTask *block_tasks, int *num_block) {
 	unsigned int idx = threadIdx.x + __umul24(blockDim.x, blockIdx.x);
 	int numb = num_block[0];
 	if (idx >= numb) return;
+#if SMS_PAIR_TASK_COALESCING
 	if (numb % 2 == 0){
 		if (idx % 2 == 0){
 			if (block_tasks[idx].cellid == block_tasks[idx + 1].cellid){
@@ -943,27 +959,65 @@ void judgeTask(BlockTask *block_tasks, int *num_block) {
 			block_tasks[idx + 1].p_offset = block_tasks[idx].p_offset + 32;
 		}
 	}
+#else
+    // The live register and shared fallbacks both execute one independent
+    // 32-particle task per warp.  Do not widen an even task's micro-cell bounds
+    // to those of the following task; that only adds out-of-radius candidates.
+    block_tasks[idx].isSame = 0;
+
+    // A fused 64-thread launch still needs a valid descriptor for an odd tail.
+    // Copy all bounds before moving the padded task past the last self particle.
+    if ((numb & 1) && idx == numb - 1)
+    {
+        block_tasks[numb] = block_tasks[idx];
+        block_tasks[numb].p_offset = block_tasks[idx].p_offset + 32;
+        block_tasks[numb].isSame = 0;
+    }
+#endif
 }
+
+#if !SMS_PAIR_TASK_COALESCING
+__global__
+void padIndependentTasks(BlockTask *block_tasks, const int *num_block) {
+	int numb = num_block[0];
+	if (numb <= 0) return;
+	int padded_count = ceil_int(numb, SMS_TASKS_PER_BLOCK) * SMS_TASKS_PER_BLOCK;
+	for (int idx = numb; idx < padded_count; ++idx) {
+		block_tasks[idx] = block_tasks[numb - 1];
+		block_tasks[idx].p_offset += static_cast<unsigned short>((idx - numb + 1) * SMS_TASK_PARTICLES);
+		block_tasks[idx].isSame = 0;
+	}
+}
+#endif
 
 void Arrangement::arrangeBlockTasksFixedM(int *hash, int *celloff, int *cellnum, BlockTask* d_task_array, int* d_cta_reqs, int* d_task_array_offset, int cta_size) {
 	int num_thread = 128;
 	int num_block = ceil_int(numc_, num_thread);
 
-	knArrangeTasksFixedM << <num_block, num_thread >> >(hash, celloff, cellnum, d_task_array, d_num_cta_, d_cta_reqs, d_task_array_offset, grid_size_, cta_size, numc_);
+	knArrangeTasksFixedM << <num_block, num_thread >> >(hash, celloff, cellnum,
+        d_task_array, d_num_cta_, d_cta_reqs, d_task_array_offset,
+        grid_size_, cta_size, numc_);
 
 #if HYBRID_DEVICE_GRID_SIZING
+#if SMS_PAIR_TASK_COALESCING
 	// No host readback: judgeTask and the physics kernels size themselves on device.
 	// judgeTask's grid is over-provisioned with a safe upper bound on the task count
 	// (each task covers 32 particles and each cell adds at most one partial task).
 	int task_bound = ceil_int(nump_, 32) + numc_;
 	judgeTask << <ceil_int(task_bound, num_thread), num_thread >> >(d_task_array, d_num_cta_);
 #else
+	padIndependentTasks<<<1, 1>>>(d_task_array, d_num_cta_);
+#endif
+#else
 	CUDA_SAFE_CALL(cudaMemcpyAsync(h_num_cta_pinned_, d_num_cta_, sizeof(int), cudaMemcpyDeviceToHost, 0));
 	CUDA_SAFE_CALL(cudaStreamSynchronize(0));
 	h_num_cta_ = *h_num_cta_pinned_;
 	middle_value_ = *h_middle_value_pinned_;
-
+#if SMS_PAIR_TASK_COALESCING
 	judgeTask << <ceil_int(h_num_cta_, num_thread), num_thread >> >(d_task_array, d_num_cta_);
+#else
+	padIndependentTasks<<<1, 1>>>(d_task_array, d_num_cta_);
+#endif
 #endif
 }
 
@@ -1387,12 +1441,12 @@ int Arrangement::arrangeHybridMode9(){
 }
 void Arrangement::arrangeHybridMode9M(){
 	CountingSort_O_M();
-	gpu_model::calculateBlockRequirementHybridMode(cell_type, d_cell_nump_, d_block_reqs_, p_gpu_model_, d_cell_offset_, d_cell_nump_, grid_size_, 32);
+	gpu_model::calculateBlockRequirementHybridMode(cell_type, d_cell_nump_, d_block_reqs_, p_gpu_model_, d_cell_offset_, d_cell_nump_, grid_size_, SMS_TASK_PARTICLES);
 	CountingSortCUDA_Two9_M();
 	//prescanArrayRecursiveInt(d_task_array_offset_32_, d_block_reqs_, numc_, 0);
 	cub::DeviceScan::ExclusiveSum(d_cub_scan_temp_, cub_scan_temp_bytes_,
                                   d_block_reqs_, d_task_array_offset_32_, numc_);
-	arrangeBlockTasksFixedM(d_hash_, d_cell_offset_, d_cell_nump_, d_block_task_, d_block_reqs_, d_task_array_offset_32_, 32);
+	arrangeBlockTasksFixedM(d_hash_, d_cell_offset_, d_cell_nump_, d_block_task_, d_block_reqs_, d_task_array_offset_32_, SMS_TASK_PARTICLES);
 	// The TRA/SMS split point stays on device (d_middle_value_); the physics
 	// kernels clamp and consume it there.
 }
