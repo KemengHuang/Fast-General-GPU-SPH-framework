@@ -22,11 +22,14 @@ Source code contributors: [Kemeng Huang](https://kemenghuang.github.io), Jiming 
 - CMake >= 3.18
 - CUDA Toolkit 12.x
 - A C++17 toolchain (MSVC 2022, GCC, or Clang)
-- GLEW, FreeGLUT and jsoncpp — e.g. via [vcpkg](https://vcpkg.io) (pick the triplet matching
-  your platform):
+- jsoncpp; GUI builds additionally require GLEW and FreeGLUT. For example, via
+  [vcpkg](https://vcpkg.io) (pick the triplet matching your platform):
   ```bash
   vcpkg install glew freeglut jsoncpp --triplet x64-windows   # or x64-linux, ...
   ```
+
+For a headless-only machine, `jsoncpp` is the only vcpkg dependency; OpenGL, GLEW, GLUT,
+render sources, shaders, and lodepng are not included in that build.
 
 **Platform note:** the code currently has a few Windows-only pieces (`windows.h`-based timers,
 `CreateDirectoryA` in the screenshot helper, backslash-style GL includes), so out-of-the-box
@@ -44,6 +47,13 @@ Visual Studio (multi-config):
 
 ```bash
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+```
+
+Compute-only headless build:
+
+```bash
+cmake -S . -B build-headless -G "Visual Studio 17 2022" -A x64 \
+  -DGSPH_HEADLESS=ON
 ```
 
 The repository default is `sm_89`. Override it for another GPU, for example
@@ -81,12 +91,16 @@ iteration during development, create a smaller scene file and change `kDefaultSc
 
 ### Headless benchmark
 
-Run a fixed number of frames without opening a window (useful for profiling and CI-style
-performance checks):
+`GSPH_HEADLESS=ON` produces an executable with no OpenGL imports or render code. It runs 200
+frames by default; override the count with `--benchmark N` or `--headless N`:
 
 ```bash
-gsph --benchmark 200
+build-headless/Release/gsph --benchmark 200
 ```
+
+The normal GUI build also accepts the same benchmark arguments and bypasses window creation at
+runtime, but it remains linked to the graphics libraries. Use the CMake option when graphics
+dependencies must be absent entirely.
 
 This prints wall-clock FPS, the TRA/SMS split, a deterministic state checksum, and per-stage
 timings (grid arrange / density / force). `--headless N` is an alias.
@@ -116,15 +130,16 @@ cmake -S . -B build-shared -DGSPH_USE_REGISTER_SMS=OFF
 ├── assets/          runtime JSON scenes and textures
 ├── shaders/         GL vertex/fragment shaders
 ├── src/             source code
+│   ├── main.cpp         common CLI/headless entry point
 │   ├── core/            shared utilities (CUDA helpers, math, parameters, timers)
 │   ├── cuda_prescan/    prefix-sum helpers included by grid/sph_arrangement.cu
 │   ├── grid/            uniform-grid construction and particle sorting
 │   ├── io/              GPU model loader/reader and statistics I/O
 │   ├── particle/        particle buffer definitions and management
-│   ├── render/          GLUT/GLEW renderer, camera, screenshot, textures
+│   ├── render/          optional GLUT/GLEW GUI, excluded from headless builds
 │   ├── simulation/      high-level simulation, marching cubes, PCISPH helpers
 │   └── solver/          CUDA SPH kernels split by physics, plus dispatch
-├── third_party/     third-party code (lodepng)
+├── third_party/     GUI-only third-party code (lodepng)
 ├── agent_docs/      code analysis, optimization reports, known issues (dev notes)
 ├── data/            placeholder for runtime output
 ├── CMakeLists.txt

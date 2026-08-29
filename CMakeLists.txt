@@ -16,26 +16,45 @@ project(Hybrid_Fluid_Simulation LANGUAGES CXX CUDA)
 # Generate compile_commands.json
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Find dependencies
-find_package(GLEW REQUIRED)
-find_package(GLUT REQUIRED)
-find_package(OpenGL REQUIRED)
+option(GSPH_HEADLESS "Build without OpenGL, GLEW, GLUT, or render sources" OFF)
+
+# Compute dependencies are always required. Graphics dependencies are resolved
+# only for the GUI build, so a headless machine needs no OpenGL development SDK.
 find_package(jsoncpp CONFIG REQUIRED)
 find_package(CUDAToolkit REQUIRED)
+if(NOT GSPH_HEADLESS)
+    find_package(GLEW REQUIRED)
+    find_package(GLUT REQUIRED)
+    find_package(OpenGL REQUIRED)
+endif()
 
 # Executable
 add_executable(gsph)
 
-# Recursively collect implementation and header files under src/ and third_party/.
+# Recursively collect the simulation sources. Headless builds exclude the
+# complete render subtree; GUI builds additionally compile the PNG loader.
 file(GLOB_RECURSE gsph_SOURCES CONFIGURE_DEPENDS
     "src/*.cpp"
     "src/*.cu"
     "src/*.h"
     "src/*.cuh"
-    "third_party/lodepng/*.cpp"
-    "third_party/lodepng/*.h"
 )
+if(GSPH_HEADLESS)
+    list(FILTER gsph_SOURCES EXCLUDE REGEX "[/\\\\]render[/\\\\]")
+else()
+    file(GLOB_RECURSE gsph_RENDER_DEPENDENCIES CONFIGURE_DEPENDS
+        "third_party/lodepng/*.cpp"
+        "third_party/lodepng/*.h"
+    )
+    list(APPEND gsph_SOURCES ${gsph_RENDER_DEPENDENCIES})
+endif()
 target_sources(gsph PRIVATE ${gsph_SOURCES})
+
+if(GSPH_HEADLESS)
+    target_compile_definitions(gsph PRIVATE GSPH_HEADLESS=1)
+else()
+    target_compile_definitions(gsph PRIVATE GSPH_HEADLESS=0)
+endif()
 
 option(GSPH_USE_REGISTER_SMS
     "Use register-resident iterator state for the SMS density/force path" ON)
@@ -45,23 +64,26 @@ else()
     target_compile_definitions(gsph PRIVATE GSPH_USE_REGISTER_SMS=0)
 endif()
 
-# Include directories
-#   src/            project headers
-#   third_party/    lodepng (used by gl_texture.h)
+# The simulation headers are always visible; lodepng is a GUI-only dependency.
 target_include_directories(gsph PRIVATE
     src/
-    third_party/lodepng/
 )
+if(NOT GSPH_HEADLESS)
+    target_include_directories(gsph PRIVATE third_party/lodepng/)
+endif()
 
-# Link libraries
-#   Only CUDA::cudart is required; cublas/cusparse/cusolver and Eigen are unused.
+# Compute libraries are always linked; graphics libraries are GUI-only.
 target_link_libraries(gsph PRIVATE
     CUDA::cudart
-    GLUT::GLUT
-    GLEW::GLEW
-    OpenGL::GL
     JsonCpp::JsonCpp
 )
+if(NOT GSPH_HEADLESS)
+    target_link_libraries(gsph PRIVATE
+        GLUT::GLUT
+        GLEW::GLEW
+        OpenGL::GL
+    )
+endif()
 
 # C++ and CUDA standards
 target_compile_features(gsph PRIVATE cxx_std_17 cuda_std_17)
@@ -112,8 +134,10 @@ add_custom_command(TARGET gsph POST_BUILD
         ${CMAKE_CURRENT_SOURCE_DIR}/assets
         $<TARGET_FILE_DIR:gsph>/assets
 )
-add_custom_command(TARGET gsph POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-        ${CMAKE_CURRENT_SOURCE_DIR}/shaders
-        $<TARGET_FILE_DIR:gsph>/shaders
-)
+if(NOT GSPH_HEADLESS)
+    add_custom_command(TARGET gsph POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_CURRENT_SOURCE_DIR}/shaders
+            $<TARGET_FILE_DIR:gsph>/shaders
+    )
+endif()

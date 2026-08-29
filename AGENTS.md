@@ -12,13 +12,14 @@ GLUT/GLEW rendering, and JSON-based scene configuration.
 
 | Path | Purpose |
 |------|---------|
+| `src/main.cpp` | Common CLI entry point; dispatches compile-time headless or optional GUI mode |
 | `src/` | All project source and headers |
 | `src/core/` | Shared utilities: CUDA helpers, math, parameters, timers |
 | `src/cuda_prescan/` | Prefix-sum helpers used by `grid/sph_arrangement.cu` (`scan.cu` is compiled; `prefix_sum.cu` is header-guarded and included by `scan.cu`) |
 | `src/grid/` | Uniform-grid construction and particle sorting (`sph_arrangement`) |
 | `src/io/` | GPU model loader/reader and statistics I/O |
 | `src/particle/` | Particle buffer definitions and management (`particle_buffer`) |
-| `src/render/` | GLUT/GLEW renderer, camera state, screenshot, shaders/textures |
+| `src/render/` | Optional GLUT/GLEW GUI, camera state, screenshot, textures, CUDA-GL bridge |
 | `src/simulation/` | High-level simulation class, marching cubes, PCISPH factor helpers |
 | `src/solver/` | CUDA SPH kernels split by physics: density, force, integration, PCI-SPH, plus device context and host dispatch |
 | `assets/` | Runtime JSON scenes and statistics files (`scene_default.json`, `*_statistics.json`, `insts_latency.json`, `ball32.png`) |
@@ -34,12 +35,19 @@ GLUT/GLEW rendering, and JSON-based scene configuration.
 - **CUDA:** 12.x (tested with 12.4.131)
 - **CMake:** >= 3.18
 - **MSBuild:** Visual Studio 2022 toolset
-- **vcpkg packages:** `glew`, `freeglut`, `jsoncpp` (x64-windows)
+- **vcpkg packages:** `jsoncpp`; GUI builds also need `glew` and `freeglut` (x64-windows)
 
 ### Configure
 
 ```bash
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+```
+
+For a compute-only build with no GL dependencies or render sources:
+
+```bash
+cmake -S . -B build-headless -G "Visual Studio 17 2022" -A x64 ^
+  -DGSPH_HEADLESS=ON
 ```
 
 If vcpkg is not on the default search path, pass the toolchain file:
@@ -60,8 +68,9 @@ debugger working directory is `$(OutDir)`.
 
 ## Runtime Assets
 
-`CMakeLists.txt` copies `assets/` and `shaders/` to the output directory as a post-build step.
-The executable expects the following files in its working directory:
+`CMakeLists.txt` always copies `assets/`. GUI builds also copy `shaders/`; headless builds do not.
+All builds need the scene/statistics JSON files below; GUI builds additionally load
+`ball32.png` and ship the shader directory:
 
 - `scene_default.json`
 - `scene_default1.json`
@@ -79,6 +88,10 @@ These paths are also hard-coded in:
 
 ## Important Implementation Notes
 
+- **`GSPH_HEADLESS=ON` is a compile-time graphics boundary.** CMake skips GL/GLEW/GLUT lookup
+  and linking, excludes `src/render/` and lodepng, defines `GSPH_HEADLESS=1`, and omits all
+  GL/CUDA-GL members and calls from `HybridSystem`. The headless executable defaults to a
+  200-frame benchmark and accepts `--benchmark N` / `--headless N`.
 - **CUDA textures were removed.** Older versions used `tex1Dfetch`; the current code reads
   particle data directly from global memory (`buff_list.position_d[idx]`,
   `buff_list.evaluated_velocity[idx]`). Do not reintroduce texture references.
@@ -103,9 +116,9 @@ These paths are also hard-coded in:
   the missing pieces.
 - **Screenshot capture runs before `glutSwapBuffers`** (back buffer is undefined after a swap)
   and creates the `screenshot/` directory on demand.
-- **`CMakeLists.txt` recursively collects all source/header files under `src/` and
-  `third_party/lodepng/`.** `prefix_sum.cu` is header-guarded and is pulled in by
-  `scan.cu`; adding it via the recursive glob only makes it visible in the IDE tree.
+- **CMake recursively collects simulation sources under `src/`.** GUI builds add `src/render/`
+  and `third_party/lodepng/`; headless builds filter both out. `prefix_sum.cu` is header-guarded
+  and is pulled in by `scan.cu`; the glob only makes it visible in the IDE tree.
 - **Unused dependencies were removed from CMake.** `Eigen3`, `cublas`, `cusparse`, and
   `cusolver` are not linked anymore because they are not used in the source.
 

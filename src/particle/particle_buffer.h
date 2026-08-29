@@ -9,8 +9,6 @@
 #define _PARTICLE_BUFFER_H
 
 #include <windows.h>
-#include <GL/glew.h>
-#include <cuda_gl_interop.h>
 #include "core/cuda_call_check.h"
 
 typedef unsigned int uint;

@@ -9,6 +9,8 @@
 #ifndef _SPH_UTILS_CUH
 #define _SPH_UTILS_CUH
 
+#include "core/compile_config.h"
+
 #include <math.h>
 #include <cuda_runtime.h>
 
@@ -22,10 +24,6 @@
 // the single mid-frame sync does.
 #ifndef HYBRID_DEVICE_GRID_SIZING
 #define HYBRID_DEVICE_GRID_SIZING 0
-#endif
-
-#ifndef GSPH_USE_REGISTER_SMS
-#define GSPH_USE_REGISTER_SMS 1
 #endif
 
 namespace sph

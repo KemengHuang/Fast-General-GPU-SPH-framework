@@ -144,6 +144,7 @@ build/Release/gsph.exe --benchmark 200
 ```
 
 For the shared-memory A/B build, add `-DGSPH_USE_REGISTER_SMS=OFF` at configure time.
+For a build with no OpenGL/render dependencies, add `-DGSPH_HEADLESS=ON`.
 
 Register check after kernel changes:
 

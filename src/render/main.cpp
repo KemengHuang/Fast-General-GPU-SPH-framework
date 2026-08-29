@@ -9,6 +9,7 @@
 #include "render/camera_state.h"
 #include "simulation/sph_hybrid_system.h"
 #include "render/app.h"
+#include "render/gui_application.h"
 
 //#pragma comment(lib, "glew32.lib") 
 
@@ -403,33 +404,8 @@ void motion_func(int x, int y)
     glutPostRedisplay();
 }
 
-int main(int argc, char **argv)
+int runGuiApplication(int argc, char **argv)
 {
-    // Parse global options before GLUT gets a chance to consume them.
-    int benchmark_frames = 0;
-    for (int i = 1; i < argc; ++i)
-    {
-        if ((std::strcmp(argv[i], "--headless") == 0 || std::strcmp(argv[i], "--benchmark") == 0) && i + 1 < argc)
-        {
-            benchmark_frames = std::atoi(argv[i + 1]);
-            ++i;
-        }
-    }
-
-    if (benchmark_frames > 0)
-    {
-        // Headless compute-only benchmark: no GL window, no VBO registration,
-        // no D2H copy. Useful for profiling the simulation with Nsight/NSight Compute.
-        real_world_origin.x = -40.0f; real_world_origin.y = -40.0f; real_world_origin.z = -40.0f;
-        real_world_side.x = 80.0f;    real_world_side.y = 80.0f;    real_world_side.z = 80.0f;
-
-        if (!init_cuda()) return -1;
-        sph_system = new sph::HybridSystem(real_world_side, real_world_origin, true);
-        sph_system->runBenchmark(benchmark_frames);
-        delete sph_system;
-        return 0;
-    }
-
     glutInit(&argc, argv);
     glutInitDisplayMode(GLUT_DEPTH | GLUT_DOUBLE | GLUT_RGBA);
     glutInitWindowPosition(0, 0);

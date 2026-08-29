@@ -63,4 +63,5 @@ Items are ordered by severity, not by priority.
   in one branch, which under-allocates one SMS task for cells with 33–36 particles (tail particles
   keep stale density for the frame). Upstream heuristic quirk; changing it alters published
   behavior.
-- Fixed-function GL everywhere; `shaders/particle.vs/.fs` are shipped but never loaded.
+- The optional GUI build still uses fixed-function GL; `shaders/particle.vs/.fs` are shipped but
+  never loaded. Headless builds exclude the complete graphics subtree and shader copy step.

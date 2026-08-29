@@ -14,8 +14,7 @@
 #include <iomanip>
 #include <sstream>
 #include <vector>
-#include <GL/freeglut.h>
-#include <cuda_gl_interop.h>
+
 #include "json/json.h"
 #include "json/reader.h"
 #include "core/cuda_math.cuh"
@@ -196,37 +195,19 @@ inline void defaultInitializeSPHSysPara(SystemParameter &sys_para, Scene *scene)
 
 
 
-void setOrthographicProjection(GLdouble w, GLdouble h)
-{
-    glMatrixMode(GL_PROJECTION);
-    glPushMatrix();
-    glLoadIdentity();
-    gluOrtho2D(0, w, h, 0);
-    glMatrixMode(GL_MODELVIEW);
-}
-
-void restorePerspectiveProjection()
-{
-    glMatrixMode(GL_PROJECTION);
-    glPopMatrix();
-    glMatrixMode(GL_MODELVIEW);
-}
-
-void renderBitmapString(float x, float y, float z, void *font, const std::stringstream &ss)
-{
-    std::string str = ss.str();
-    const char *c;
-    glRasterPos3f(x, y, z);
-    for (c = str.c_str(); *c != '\0'; c++) {
-        glutBitmapCharacter(font, *c);
-    }
-}
 
 /****************************** HybridSystem ******************************/
 
 HybridSystem::HybridSystem(const float3 &real_world_side, const float3 &sim_origin, bool headless)
+#if GSPH_HEADLESS
+    : headless_mode_(true)
+#else
     : headless_mode_(headless)
+#endif
 {
+#if GSPH_HEADLESS
+    (void)headless;
+#endif
 	Scene scene;
     defaultInitializeSPHSysPara(sys_para_, &scene);
     sys_para_.sim_ratio = make_float3(real_world_side.x / sys_para_.world_size.x,
@@ -242,22 +223,9 @@ HybridSystem::HybridSystem(const float3 &real_world_side, const float3 &sim_orig
 
 	initializeScene(kDefaultSceneFileName, scene);
 
-    if (!headless_mode_)
-    {
-        // render
-        particle_texture_.loadPNG("assets/ball32.png");
-        glGenBuffers(1, &position_vbo_);
-        glGenBuffers(1, &color_vbo_);
-
-        // Allocate GPU storage once, then register the VBOs with CUDA so the
-        // particle data can be copied directly from device memory each frame.
-        glBindBuffer(GL_ARRAY_BUFFER, position_vbo_);
-        glBufferData(GL_ARRAY_BUFFER, nump_ * sizeof(float3), nullptr, GL_DYNAMIC_DRAW);
-        glBindBuffer(GL_ARRAY_BUFFER, color_vbo_);
-        glBufferData(GL_ARRAY_BUFFER, nump_ * sizeof(uint), nullptr, GL_DYNAMIC_DRAW);
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
-        registerGraphicsResources();
-    }
+#if !GSPH_HEADLESS
+    initializeGraphics();
+#endif
 
     generate_mesh_ = false;
     add_smoke_ = false;
@@ -265,8 +233,9 @@ HybridSystem::HybridSystem(const float3 &real_world_side, const float3 &sim_orig
 
 HybridSystem::~HybridSystem()
 {
-    waitForGraphicsCopy();
-    unregisterGraphicsResources();
+#if !GSPH_HEADLESS
+    shutdownGraphics();
+#endif
     destroyPersistentCudaResources();
     delete arrangement_;
     arrangement_ = nullptr;
@@ -331,21 +300,9 @@ void HybridSystem::tick()
     advance(device_buff_.get_buff_list(), nump_);
     if (get_detailed_time_) CUDA_SAFE_CALL(cudaEventRecord(tick_events_[4]));
 
-    // Record the point where all simulation kernels for this frame finish.
-    // If CUDA-GL interop is unavailable we fall back to asynchronous D2H
-    // copies that the draw path will synchronize on.
-    CUDA_SAFE_CALL(cudaEventRecord(compute_done_event_, 0));
-    if (!headless_mode_ && !vbo_resources_registered_)
-    {
-        CUDA_SAFE_CALL(cudaStreamWaitEvent(copy_stream_, compute_done_event_, 0));
-        CUDA_SAFE_CALL(cudaMemcpyAsync(host_buff_.get_buff_list().final_position,
-                                       device_buff_.get_buff_list().final_position,
-                                       nump_ * sizeof(float3), cudaMemcpyDeviceToHost, copy_stream_));
-        CUDA_SAFE_CALL(cudaMemcpyAsync(host_buff_.get_buff_list().color,
-                                       device_buff_.get_buff_list().color,
-                                       nump_ * sizeof(uint), cudaMemcpyDeviceToHost, copy_stream_));
-        CUDA_SAFE_CALL(cudaEventRecord(copy_done_event_, copy_stream_));
-    }
+#if !GSPH_HEADLESS
+    stageParticleDataForGraphics();
+#endif
 
     tick_timer_.set_end();
     total_time_ = static_cast<float>(tick_timer_.get_millisecond());
@@ -596,157 +553,6 @@ void HybridSystem::insertParticles(unsigned int type)
     }
 }
 
-void HybridSystem::drawParticles(float rad, int size)
-{
-    glEnable(GL_BLEND);
-    glEnable(GL_ALPHA_TEST);
-    glAlphaFunc(GL_GREATER, 0.5);
-    glDepthMask(GL_TRUE);
-    glEnable(GL_DEPTH_TEST);
-    glEnable(GL_COLOR_MATERIAL);
-    glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE);
-    glEnable(GL_LIGHTING);
-    glEnable(GL_LIGHT0);
-
-    glEnable(GL_POINT_SPRITE_ARB);
-    float quadratic[] = { 1.0f, 0.01f, 0.001f };
-    glEnable(GL_POINT_DISTANCE_ATTENUATION);
-    glPointParameterfvARB(GL_POINT_DISTANCE_ATTENUATION, quadratic);
-    glPointSize(size);
-    glPointParameterfARB(GL_POINT_SIZE_MAX, 32);
-    glPointParameterfARB(GL_POINT_SIZE_MIN, 1.0f);
-
-    // Texture and blending mode
-    glEnable(GL_TEXTURE_2D);
-    glBindTexture(GL_TEXTURE_2D, particle_texture_.get_texture());
-    glTexEnvi(GL_POINT_SPRITE, GL_COORD_REPLACE, GL_TRUE);
-    glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-    // Upload particle data.  Prefer CUDA-GL interop (device->device copy)
-    // over a host round-trip.
-    if (vbo_resources_registered_)
-    {
-        CUDA_SAFE_CALL(cudaStreamWaitEvent(0, compute_done_event_, 0));
-
-        CUDA_SAFE_CALL(cudaGraphicsMapResources(1, &position_vbo_res_, 0));
-        CUDA_SAFE_CALL(cudaGraphicsMapResources(1, &color_vbo_res_, 0));
-
-        size_t num_bytes_pos = 0, num_bytes_col = 0;
-        float3 *d_position_vbo = nullptr;
-        uint *d_color_vbo = nullptr;
-        CUDA_SAFE_CALL(cudaGraphicsResourceGetMappedPointer((void**)&d_position_vbo, &num_bytes_pos, position_vbo_res_));
-        CUDA_SAFE_CALL(cudaGraphicsResourceGetMappedPointer((void**)&d_color_vbo, &num_bytes_col, color_vbo_res_));
-
-        copyParticleDataToVBOs(device_buff_.get_buff_list(), nump_, d_position_vbo, d_color_vbo);
-
-        CUDA_SAFE_CALL(cudaGraphicsUnmapResources(1, &position_vbo_res_, 0));
-        CUDA_SAFE_CALL(cudaGraphicsUnmapResources(1, &color_vbo_res_, 0));
-    }
-    else
-    {
-        waitForGraphicsCopy();
-    }
-
-    // Point buffers
-	//GLint gsize = size;
-    glBindBuffer(GL_ARRAY_BUFFER, position_vbo_);
-    if (!vbo_resources_registered_)
-    {
-        glBufferData(GL_ARRAY_BUFFER, nump_ * sizeof(float3), host_buff_.get_buff_list().final_position, GL_DYNAMIC_DRAW);
-    }
-	glVertexPointer(3, GL_FLOAT, 0, 0x0);
-    glBindBuffer(GL_ARRAY_BUFFER, color_vbo_);
-    if (!vbo_resources_registered_)
-    {
-        glBufferData(GL_ARRAY_BUFFER, nump_ * sizeof(uint), host_buff_.get_buff_list().color, GL_DYNAMIC_DRAW);
-    }
-    glColorPointer(4, GL_UNSIGNED_BYTE, 0, 0x0);
-    glEnableClientState(GL_VERTEX_ARRAY);
-    glEnableClientState(GL_COLOR_ARRAY);
-
-    //for (size_t i = 1000; i < 1020; ++i)
-    //{
-    //    printf("color: %u\n", host_buff_.color[i]);
-    //}
-
-    // Render - Point Sprites
-    glNormal3f(0, 1, 0.001);
-    glColor4f(1, 1, 1, 1);
-    glDrawArrays(GL_POINTS, 0, nump_);
-
-    // Restore state
-    glDisableClientState(GL_VERTEX_ARRAY);
-    glDisableClientState(GL_COLOR_ARRAY);
-    glDisable(GL_POINT_SPRITE_ARB);
-    glDisable(GL_ALPHA_TEST);
-    glDisable(GL_TEXTURE_2D);
-    glDepthMask(GL_TRUE);
-}
-void HybridSystem::drawInfo(GLdouble w, GLdouble h)
-{
-    float x = 20, y = 20, delta_y = 20;
-    std::stringstream ss;
-    static unsigned int frame = 0;
-    static float time = 0.0f, acc_time = 0.0f;
-
-    setOrthographicProjection(w, h);
-	//tt++;
-    glPushMatrix();
-    glLoadIdentity();
-    glColor3f(1.0f, 1.0f, 1.0f);
-    glDisable(GL_LIGHTING);
-
-    // output particles
-    frame_timer_.set_end();
-    acc_time += frame_timer_.get_millisecond();
-    frame_timer_.set_start();
-    ++frame;
-    if (acc_time > 100.0f) {
-        time = 1000 * frame / acc_time; frame = 0; acc_time = 0.0f;
-    }
-
-    ss << "FPS: " << time;  // smoothed wall-clock FPS
-
-
-    frame_timer_.set_start();
-    renderBitmapString(x, y, 0, GLUT_BITMAP_HELVETICA_12, ss);
-    ss.str(""); y += delta_y;
-
-    // output number of particles
-    ss << "#particles: " << nump_;
-    renderBitmapString(x, y, 0, GLUT_BITMAP_HELVETICA_12, ss);
-    ss.str(""); y += delta_y;
-
-    // output frame index and total frame time
-    ss << "frame: " << loop << "  total time: " << total_time_ << "ms";
-    renderBitmapString(x, y, 0, GLUT_BITMAP_HELVETICA_12, ss);
-    ss.str(""); y += delta_y;
-
-    // output detailed time
-    if (get_detailed_time_)
-    {
-		ss << "Simulation detailed time: ";
-		renderBitmapString(x, y, 0, GLUT_BITMAP_HELVETICA_12, ss);
-		ss.str(""); y += delta_y;
-		ss << "    preprocessing: " << pre_time_ << "ms";
-		renderBitmapString(x, y, 0, GLUT_BITMAP_HELVETICA_12, ss);
-		ss.str(""); y += delta_y;
-		ss << "    density computation: " << density_time_ << "ms";
-		renderBitmapString(x, y, 0, GLUT_BITMAP_HELVETICA_12, ss);
-		ss.str(""); y += delta_y;
-		ss << "    force computation: " << force_time_ << "ms";
-		renderBitmapString(x, y, 0, GLUT_BITMAP_HELVETICA_12, ss);
-		ss.str(""); y += delta_y;
-		ss << "    total consumption: " << total_time_ << "ms";
-		renderBitmapString(x, y, 0, GLUT_BITMAP_HELVETICA_12, ss);
-		ss.str(""); y += delta_y;
-    }
-
-    glPopMatrix();
-
-    restorePerspectiveProjection();
-}
 
 void HybridSystem::resetBuffer(uint nump)
 {
@@ -841,43 +647,13 @@ void HybridSystem::action1()
     arrangement_->resetNumParticle(nump_);
 }
 
-void HybridSystem::registerGraphicsResources()
-{
-    if (vbo_resources_registered_) return;
-
-    cudaError_t pos_err = cudaGraphicsGLRegisterBuffer(&position_vbo_res_, position_vbo_, cudaGraphicsMapFlagsWriteDiscard);
-    cudaError_t col_err = cudaGraphicsGLRegisterBuffer(&color_vbo_res_, color_vbo_, cudaGraphicsMapFlagsWriteDiscard);
-    if (pos_err == cudaSuccess && col_err == cudaSuccess)
-    {
-        vbo_resources_registered_ = true;
-    }
-    else
-    {
-        // Registration failed (e.g. no GL context or unsupported config).
-        // Clean up any partial registration and fall back to the host-copy path.
-        if (pos_err == cudaSuccess) cudaGraphicsUnregisterResource(position_vbo_res_);
-        if (col_err == cudaSuccess) cudaGraphicsUnregisterResource(color_vbo_res_);
-        position_vbo_res_ = nullptr;
-        color_vbo_res_ = nullptr;
-    }
-}
-
-void HybridSystem::unregisterGraphicsResources()
-{
-    if (!vbo_resources_registered_) return;
-    CUDA_SAFE_CALL(cudaGraphicsUnregisterResource(position_vbo_res_));
-    CUDA_SAFE_CALL(cudaGraphicsUnregisterResource(color_vbo_res_));
-    position_vbo_res_ = nullptr;
-    color_vbo_res_ = nullptr;
-    vbo_resources_registered_ = false;
-}
 
 void HybridSystem::createPersistentCudaResources()
 {
     // Guarded so repeated calls (e.g. lazy tick-event creation in tick()) do not leak.
-    if (!copy_stream_) CUDA_SAFE_CALL(cudaStreamCreate(&copy_stream_));
-    if (!compute_done_event_) CUDA_SAFE_CALL(cudaEventCreate(&compute_done_event_));
-    if (!copy_done_event_) CUDA_SAFE_CALL(cudaEventCreate(&copy_done_event_));
+#if !GSPH_HEADLESS
+    createGraphicsCudaResources();
+#endif
 
     if (get_detailed_time_ && !tick_events_created_)
     {
@@ -900,16 +676,8 @@ void HybridSystem::destroyPersistentCudaResources()
         }
         tick_events_created_ = false;
     }
-    if (copy_done_event_) { CUDA_SAFE_CALL(cudaEventDestroy(copy_done_event_)); copy_done_event_ = nullptr; }
-    if (compute_done_event_) { CUDA_SAFE_CALL(cudaEventDestroy(compute_done_event_)); compute_done_event_ = nullptr; }
-    if (copy_stream_) { CUDA_SAFE_CALL(cudaStreamDestroy(copy_stream_)); copy_stream_ = nullptr; }
-}
-
-void HybridSystem::waitForGraphicsCopy()
-{
-    if (copy_stream_)
-    {
-        CUDA_SAFE_CALL(cudaStreamSynchronize(copy_stream_));
-    }
+#if !GSPH_HEADLESS
+    destroyGraphicsCudaResources();
+#endif
 }
 }

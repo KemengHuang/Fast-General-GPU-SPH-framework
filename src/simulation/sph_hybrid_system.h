@@ -14,8 +14,14 @@
 #include <utility>
 #include <vector>
 #include <cuda_runtime.h>
+
+#include "core/compile_config.h"
+
+#if !GSPH_HEADLESS
 #include <GL/glew.h>
 #include "render/gl_texture.h"
+#endif
+
 #include "core/high_resolution_timer.h"
 #include "grid/sph_arrangement.h"
 #include "core/sph_parameter.h"
@@ -52,8 +58,10 @@ public:
 
 	void insertParticles(unsigned int type);
 
+#if !GSPH_HEADLESS
     void drawParticles(float rad, int size);
     void drawInfo(GLdouble w, GLdouble h);
+#endif
 	int loop;
 
 private:
@@ -65,7 +73,14 @@ private:
 
     void createPersistentCudaResources();
     void destroyPersistentCudaResources();
+#if !GSPH_HEADLESS
+    void initializeGraphics();
+    void shutdownGraphics();
+    void stageParticleDataForGraphics();
+    void createGraphicsCudaResources();
+    void destroyGraphicsCudaResources();
     void waitForGraphicsCopy();
+#endif
 
     bool is_running_ = false;
     uint nump_ = 0U;
@@ -80,7 +95,9 @@ private:
     //std::unique_ptr<Arrangement> arrangement_;
 	Arrangement *arrangement_ = nullptr;
 	float particle_interval = 0.5f;
+#if !GSPH_HEADLESS
     HighResolutionTimerForWin frame_timer_;
+#endif
     HighResolutionTimerForWin tick_timer_;
     bool headless_mode_ = false;
     bool get_detailed_time_ = false;
@@ -89,7 +106,8 @@ private:
     bool generate_mesh_;
 	bool add_smoke_;
 
-    // render
+#if !GSPH_HEADLESS
+    // Rendering and CUDA-GL interop resources are absent from headless builds.
     PNGTexture particle_texture_;
     GLuint position_vbo_;
     GLuint color_vbo_;
@@ -101,10 +119,12 @@ private:
     cudaGraphicsResource_t color_vbo_res_ = nullptr;
     bool vbo_resources_registered_ = false;
 
-    // asynchronous device->host copy resources
+    // Asynchronous fallback used when CUDA-GL interop is unavailable.
     cudaStream_t copy_stream_ = nullptr;
     cudaEvent_t compute_done_event_ = nullptr;
     cudaEvent_t copy_done_event_ = nullptr;
+#endif
+
     cudaEvent_t tick_events_[5] = {};
     bool tick_events_created_ = false;
 

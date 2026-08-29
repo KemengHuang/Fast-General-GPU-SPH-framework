@@ -31,36 +31,6 @@ inline void reallocDeviceBuffer(T *&p, unsigned int old_nump, unsigned int new_n
     p = temp;
 }
 
-//inline void reallocGLBuffer(GLuint &vbo, cudaGraphicsResource *&vbo_cuda, cudaGraphicsMapFlags map_flag, unsigned int new_size/* in bytes */)
-//{
-//    GLuint temp_vbo;
-//    cudaGraphicsResource *temp_vbo_cuda;
-//
-//    glGenBuffers(1, &temp_vbo);
-//    glBindBuffer(GL_ARRAY_BUFFER, temp_vbo);
-//    glBufferData(GL_ARRAY_BUFFER, new_size, 0, GL_DYNAMIC_DRAW);
-//    glBindBuffer(GL_ARRAY_BUFFER, 0);
-//    CUDA_SAFE_CALL(cudaGraphicsGLRegisterBuffer(&temp_vbo_cuda, temp_vbo, map_flag));
-//
-//    // copy data
-//    if (cudaGraphicsMapFlagsNone == map_flag || cudaGraphicsMapFlagsReadOnly == map_flag)
-//    {
-//        GLint data_size;
-//        glBindBuffer(GL_COPY_READ_BUFFER, vbo);
-//        glGetBufferParameteriv(GL_COPY_READ_BUFFER, GL_BUFFER_SIZE, &data_size);
-//        glBindBuffer(GL_COPY_WRITE_BUFFER, temp_vbo);
-//        glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0, data_size);
-//        glBindBuffer(GL_COPY_READ_BUFFER, 0);
-//        glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
-//    }
-//
-//    CUDA_SAFE_CALL(cudaGraphicsUnregisterResource(vbo_cuda));
-//    glDeleteBuffers(1, &vbo);
-//
-//    vbo = temp_vbo;
-//    vbo_cuda = temp_vbo_cuda;
-//}
-
 template<typename T>
 inline void reallocHostPinnedBuffer(T *&p, unsigned int old_nump, unsigned int new_nump)
 {

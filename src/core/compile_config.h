@@ -1,0 +1,12 @@
+#ifndef GSPH_COMPILE_CONFIG_H_
+#define GSPH_COMPILE_CONFIG_H_
+
+#ifndef GSPH_HEADLESS
+#define GSPH_HEADLESS 0
+#endif
+
+#ifndef GSPH_USE_REGISTER_SMS
+#define GSPH_USE_REGISTER_SMS 1
+#endif
+
+#endif // GSPH_COMPILE_CONFIG_H_

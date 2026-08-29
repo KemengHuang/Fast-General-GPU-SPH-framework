@@ -17,7 +17,7 @@ files. Target: Windows / VS2022 / CUDA 12.x / RTX 4090 (sm_89).
 | Density | `computeDensityHybridKernel` — one fused launch; TRA branch gathers sparse particles through `compact_indices`, while the SMS branch runs two independent 32-particle warps per 64-thread block using `SmsRegisterTaskIterator` |
 | Force | `computeForceHybridKernel` — same split and task structure; neighbor velocity is read only after the distance test passes |
 | Integrate | `knIntegrateVelocityE` |
-| Render | `knCopyToVBOs` writes `final_position`/`color` directly into CUDA-registered GL VBOs (no host round-trip) |
+| Render (GUI only) | `render/particle_vbo_copy.cu` writes `final_position`/`color` directly into CUDA-registered GL VBOs. `GSPH_HEADLESS=ON` excludes this kernel and all GL code. |
 
 Neighbor search: cell size = kernel radius `h`, so 27 neighbor cells; both paths iterate 9 "rows"
 (y,z ∈ {-1,0,1}) and merge 3 x-adjacent cells into one contiguous index range (valid because the
@@ -54,6 +54,8 @@ is **dead at runtime** (~40% of the source tree).
 - `velocity`/`acceleration`/`final_position` are 12-byte `float3` — misaligned 3-word accesses.
 
 ### `src/render/`
+- GUI-only subtree. `GSPH_HEADLESS=ON` removes it from the target before compilation; the common
+  `src/main.cpp` supplies the compute-only executable entry point.
 - 100% fixed-function pipeline; `shaders/particle.vs/.fs` are never compiled or loaded.
 - Point sprites via `GL_POINT_SPRITE_ARB` + `ball32.png` texture; HUD via `glutBitmapCharacter`.
 
