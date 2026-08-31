@@ -1,6 +1,7 @@
 # Fast-General-GPU-SPH-framework
 
-This framework is a fast, general implementation of a GPU SPH method utilizing a uniform grid.
+This framework is a CUDA/C++17 implementation of Smoothed Particle Hydrodynamics (SPH) using a
+uniform-grid neighbor search and hybrid SMS/TRA scheduling.
 
 ## Description
 
@@ -9,31 +10,29 @@ This project is the source code of
 and
 ["A General Novel Parallel Framework for SPH-centric Algorithms"](https://dl.acm.org/doi/10.1145/3321360).
 
-It offers fast optimization strategies based on a uniform grid. It also serves as an excellent benchmark for further research on GPU SPH and for meaningful comparisons.
+It provides a research implementation and benchmark for uniform-grid GPU SPH scheduling,
+neighbor exchange, and kernel optimization.
 
 Source code contributors: [Kemeng Huang](https://kemenghuang.github.io), Jiming Ruan.
-
-**Note: this software is released under the MPLv2.0 license. For commercial use, please email the authors for negotiation.**
 
 ## Build & Run
 
 ### Requirements
 
 - CMake >= 3.18
-- CUDA Toolkit 12.x
-- A C++17 toolchain (MSVC 2022, GCC, or Clang)
+- CUDA Toolkit 12.x or 13.x (tested with CUDA 12.4 and 13.2)
+- A C++17 toolchain (tested with Visual Studio 2022/2026 on Windows)
 - jsoncpp; GUI builds additionally require GLEW and FreeGLUT. For example, via
   [vcpkg](https://vcpkg.io) (pick the triplet matching your platform):
   ```bash
-  vcpkg install glew freeglut jsoncpp --triplet x64-windows   # or x64-linux, ...
+  vcpkg install glew freeglut jsoncpp --triplet x64-windows
   ```
 
 For a headless-only machine, `jsoncpp` is the only vcpkg dependency; OpenGL, GLEW, GLUT,
 render sources, shaders, and lodepng are not included in that build.
 
-**Platform note:** the code currently has a few Windows-only pieces (`windows.h`-based timers,
-`CreateDirectoryA` in the screenshot helper, backslash-style GL includes), so out-of-the-box
-builds target Windows. Porting to Linux/macOS only requires small shims in those spots.
+**Platform note:** out-of-the-box builds target Windows. The timer, screenshot helper, GL setup,
+and parts of the host code require platform adaptation before building on Linux or macOS.
 
 ### Configure
 
@@ -56,16 +55,32 @@ cmake -S . -B build-headless -G "Visual Studio 17 2022" -A x64 \
   -DGSPH_HEADLESS=ON
 ```
 
-The repository default is `sm_89`. Override it for another GPU, for example
-`-DCMAKE_CUDA_ARCHITECTURES=120` on RTX 5090.
-
-Release and RelWithDebInfo builds enable host IPO and CUDA device LTO by default. Disable it for
-toolchain compatibility or A/B testing with `-DGSPH_ENABLE_IPO=OFF`.
-
 If the dependencies are not on the default search path, point CMake at vcpkg:
 
 ```bash
 cmake -S . -B build ... -DCMAKE_TOOLCHAIN_FILE=<vcpkg-root>/scripts/buildsystems/vcpkg.cmake
+```
+
+### CMake options
+
+| Option | Default | Purpose |
+|---|---:|---|
+| `GSPH_HEADLESS` | `OFF` | Exclude OpenGL, GLUT/GLEW, lodepng, shaders, and render sources |
+| `GSPH_USE_REGISTER_SMS` | `ON` | Select the optimized register SMS path; `OFF` builds the shared-memory reference |
+| `GSPH_ENABLE_HISTORICAL_ISSAME` | `ON` | Preserve historical `judgeTask` pairing and GUI task colors |
+| `GSPH_ENABLE_SMS_LOCAL_MERGE` | `ON` | Cooperatively stage `isSame` pairs during density |
+| `GSPH_ENABLE_SMS_LOCAL_MERGE_FORCE` | `OFF` | Experimental paired force staging; slower on RTX 5090 |
+| `GSPH_ENABLE_SAME_CELL_PAIR_FORCE` | `OFF` | Research prototype for pair-once same-cell force; substantially slower |
+| `GSPH_ENABLE_IPO` | `ON` | Enable host IPO and CUDA device LTO in optimized configurations |
+
+The default CUDA architecture is `89`. Pass `-DCMAKE_CUDA_ARCHITECTURES=120` for a native RTX
+5090 build. Example optimized headless configuration:
+
+```bash
+cmake -S . -B build-headless -G "Visual Studio 17 2022" -A x64 \
+  -DGSPH_HEADLESS=ON \
+  -DCMAKE_CUDA_ARCHITECTURES=120 \
+  -DCMAKE_TOOLCHAIN_FILE=<vcpkg-root>/scripts/buildsystems/vcpkg.cmake
 ```
 
 ### Build
@@ -76,7 +91,8 @@ cmake --build build --config Release   # --config is only needed for multi-confi
 
 Or open the generated solution/project in your IDE and build the `Release` target. The
 executable is `gsph` (`gsph.exe` on Windows) under `build/` or `build/Release/`, and the
-runtime assets (`assets/`, `shaders/`) are copied next to it automatically.
+runtime `assets/` directory is copied next to it automatically. GUI builds also copy `shaders/`;
+headless builds do not compile or copy graphics assets.
 
 ### Run
 
@@ -109,6 +125,21 @@ dependencies must be absent entirely. Headless kernels also omit the render-only
 This prints wall-clock FPS, the TRA/SMS split, a state checksum, and per-stage
 timings (grid arrange / density / force). `--headless N` is an alias.
 
+### Optimized SMS path
+
+- One 32-particle task is assigned to each warp; production blocks contain 64 threads.
+- `BlockTask` caches coarse-cell coordinates, cell begin/count, particle offset, and historical
+  paired bounds, avoiding repeated integer division and cell-array loads in the physics kernels.
+- `position_d.w` stores reciprocal density, eliminating a reciprocal from each force-neighbor
+  interaction.
+- Density cooperatively stages eligible historical `isSame` pairs. Force retains independent
+  warp traversal because paired force staging reduced throughput.
+- CUB scans and radix sorts share one persistent device temporary allocation sized at startup.
+  Persistent key/value alternates remove runtime sort allocations; no Thrust headers or calls
+  remain in the source tree.
+- The exact-grid launch path remains the default. The device-sized over-provisioned alternative
+  is available through `HYBRID_DEVICE_GRID_SIZING` in `src/core/sph_utils.cuh`, but measured slower.
+
 The optimized register SMS path is enabled by default. Configure an equivalent legacy shared
 path build for A/B testing with:
 
@@ -129,16 +160,12 @@ bounds and stays on the faster independent register iterator. The controls are:
 -DGSPH_ENABLE_HISTORICAL_ISSAME=OFF       # disable classification and task coloring
 -DGSPH_ENABLE_SMS_LOCAL_MERGE=OFF         # keep isSame/colors, disable density staging
 -DGSPH_ENABLE_SMS_LOCAL_MERGE_FORCE=ON    # experimental force staging (slower on RTX 5090)
+-DGSPH_ENABLE_SAME_CELL_PAIR_FORCE=ON     # pair-once research prototype (substantially slower)
 ```
 
 Benchmark output reports the number and shape of paired tasks. In GUI builds the historical
 density-pass coloring is preserved: `isSame` SMS tasks are cyan, independent SMS tasks are
 yellow, and TRA particles remain magenta.
-
-The project contains no Thrust dependency. CUB scans and radix sorts share persistent device
-temporary storage allocated once by `Arrangement`; key/value alternate buffers are persistent as
-well. The optional `GSPH_ENABLE_SAME_CELL_PAIR_FORCE=ON` research prototype is intentionally off
-because shared-atomic pair accumulation is substantially slower on the default dense scene.
 
 ### Controls
 
@@ -160,7 +187,7 @@ because shared-atomic pair accumulation is substantially slower on the default d
 ├── src/             source code
 │   ├── main.cpp         common CLI/headless entry point
 │   ├── core/            shared utilities (CUDA helpers, math, parameters, timers)
-│   ├── cuda_prescan/    prefix-sum helpers included by grid/sph_arrangement.cu
+│   ├── cuda_prescan/    legacy recursive prescan helpers; the live path uses persistent CUB
 │   ├── grid/            uniform-grid construction and particle sorting
 │   ├── io/              GPU model loader/reader and statistics I/O
 │   ├── particle/        particle buffer definitions and management
@@ -176,17 +203,44 @@ because shared-atomic pair accumulation is substantially slower on the default d
 
 ## Performance
 
-Reference numbers for the default scene (~3.94M particles), measured with
-`gsph --benchmark 200` on an RTX 4090 / CUDA 12.4:
+Reference headless Release results for `assets/scene_default.json` (~4M particles):
 
-- **~35 FPS** (28.6 ms/frame): ~1.2 ms grid arrange, ~9.5 ms density, ~20 ms force
+| GPU / CUDA | Variant | Mean frame | FPS |
+|---|---|---:|---:|
+| RTX 4090 / CUDA 12.4 / `sm_89` | Historical optimized register build | ~28.6 ms | ~35.0 |
+| RTX 5090 / CUDA 13.2 / `sm_120` | Shared-memory reference | 22.901 ms | 43.67 |
+| RTX 5090 / CUDA 13.2 / `sm_120` | Register path (default) | **21.833 ms** | **45.80** |
 
-On RTX 5090 / CUDA 13.2 / native `sm_120`, the final two interleaved 1000-frame runs per variant
-measured 22.901 ms/frame for the shared path and 21.833 ms/frame for the register path
-(~4.89% throughput improvement, or ~4.66% lower frame time).
+The RTX 5090 values are the means of two interleaved 1000-frame runs per variant. The register
+path delivered 4.89% higher throughput (4.66% lower frame time). Replacing the remaining Thrust
+code with persistent CUB storage measured 22.792 ms versus 22.835 ms before the change in a
+separate interleaved 750-frame A/B, effectively no online regression.
 
-See `agent_docs/optimization_report.md` for the measured optimization history, including
-evaluated-and-rejected experiments (device-side grid sizing, neighbor-batch prefetching).
+Performance varies with driver state, clocks, scene evolution, and background GPU load. Use
+interleaved runs and compare means rather than selecting a single best result. See
+`agent_docs/optimization_report.md` for the complete history and rejected experiments.
+
+## Validation
+
+The current source has been verified with:
+
+- Register headless Release (`GSPH_USE_REGISTER_SMS=ON`)
+- Shared-memory headless Release (`GSPH_USE_REGISTER_SMS=OFF`)
+- GUI Release with CUDA-OpenGL interop
+- Compute Sanitizer `memcheck` and `synccheck` on both register and shared builds: 0 errors
+- `cuobjdump -res-usage` on native `sm_120`: density 39/38 registers, force 67 registers, no
+  stack/local spills
+
+Example sanitizer invocation:
+
+```bash
+compute-sanitizer --tool memcheck build-headless/Release/gsph.exe --benchmark 6
+compute-sanitizer --tool synccheck build-headless/Release/gsph.exe --benchmark 6
+```
+
+## License
+
+This project is licensed under the Mozilla Public License 2.0. See [LICENSE](LICENSE).
 
 ## BibTex
 
