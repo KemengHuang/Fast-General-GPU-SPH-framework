@@ -328,7 +328,11 @@ void knIntegrateVelocityE(ParticleBufferList buff_list, unsigned int nump)
 	buff_list.position_d[idx] = position;
 	buff_list.velocity[idx] = t_velocity;
 	buff_list.evaluated_velocity[idx] = floathalf4add3(t_velocity, eval_vel);
+#if !GSPH_HEADLESS
+	// final_position is a render-space VBO source.  A headless benchmark has
+	// no consumer for it, so avoid the transform and 12-byte particle write.
 	buff_list.final_position[idx] = float4m3(kDevSysPara.sim_ratio, position) + kDevSysPara.sim_origin;
+#endif
 }
 __global__
 void knIntegrateVelocity(ParticleBufferList buff_list, unsigned int nump)

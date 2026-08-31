@@ -108,8 +108,18 @@ These paths are also hard-coded in:
   kernel to 96 registers and roughly halves throughput (measured 2026-08-27). A 64-neighbor
   batch variant (`shared_pos[128]`) was also evaluated and reverted — no measurable win.
 - **The production SMS layout is fixed at 32 particles per task and 64 threads per block.**
-  The two warps stay independent; pairing them widens spatial bounds and is slower. CMake option
-  `GSPH_USE_REGISTER_SMS` selects the register path (`ON`, default) or legacy shared A/B path.
+  The historical `judgeTask` kernel is the sole `isSame` authority: globally aligned pairs are
+  marked when their `cellid` values match, the first descriptor receives the historical combined
+  bounds in `paired_bounds`, and an odd tail gets a padded partner. Do not add a spatial-volume or
+  cost heuristic to this decision. The optimized kernel assigns one thread per pair. Density uses
+  cooperative staging by default; force uses the preserved original bounds and independent
+  register traversal because force staging regressed on RTX 5090. `GSPH_ENABLE_HISTORICAL_ISSAME`
+  controls classification/colors, while `GSPH_ENABLE_SMS_LOCAL_MERGE` controls density staging.
+  `GSPH_USE_REGISTER_SMS` selects the register/hybrid or legacy fully shared A/B path.
+- **Preserve the historical task colors.** The density pass colors `isSame` SMS tasks cyan,
+  independent SMS tasks yellow, and TRA particles magenta. These colors are a visual scheduler
+  diagnostic, not merely presentation styling. GUI builds retain all three writes; headless
+  builds compile out render-only color and `final_position` work because neither has a consumer.
 - **Broken legacy kernels are kept but marked.** `knComputeDensitySMS/SMS64`,
   `knComputeForceSMS/SMS64` have uninitialized `cell_id` (assignments commented out) — launching
   them is undefined behavior. They are not on the live path; do not call them without restoring
@@ -137,6 +147,9 @@ These paths are also hard-coded in:
   `CMAKE_CUDA_ARCHITECTURES` to `89` for the RTX 4090 workstation. Reconfigure after pulling
   changes so the cache entry is updated. Pass `-DCMAKE_CUDA_ARCHITECTURES=120` explicitly for
   the RTX 5090 benchmark workstation.
+- **Optimized builds enable IPO/CUDA device LTO by default.** `GSPH_ENABLE_IPO=ON` applies to
+  Release and RelWithDebInfo. On RTX 5090 / CUDA 13.2 it improved 500-frame wall time by about
+  2%; disable it only for toolchain compatibility or a controlled A/B.
 - **MSVC `/O2` is only added in Release/RelWithDebInfo.** Debug builds keep the default `/Od`
   and `/RTC1`; this avoids the "/O2 and /RTC1 are incompatible" error when building the
   `Debug` configuration in Visual Studio.
@@ -149,9 +162,9 @@ These paths are also hard-coded in:
   `get_detailed_time_` for maximum throughput.
 - **The leftover benchmark file** (`combine666...txt`) and its locked file handle were removed;
   the file is no longer opened at startup.
-- **Per-frame scalar D2H copies are now asynchronous.** `middle_value_` and `h_num_cta_` are
-  copied into pinned host buffers with `cudaMemcpyAsync` + `cudaStreamSynchronize`, avoiding the
-  implicit global device sync of synchronous `cudaMemcpy`.
+- **Per-frame scalar D2H data is contiguous.** `middle_value_` and `h_num_cta_` occupy one device
+  `int2` and are copied to one pinned `int2` with a single `cudaMemcpyAsync` followed by the
+  existing stream sync. Do not split this back into two 4-byte transfers.
 - **Hybrid kernel launch sizing.** The density/force hybrid kernels read the TRA/SMS split
   point (`d_middle_value_`) and the SMS task count (`d_num_cta_`) directly from device memory
   and size their own branch split; `HYBRID_DEVICE_GRID_SIZING` in `src/core/sph_utils.cuh`
@@ -159,9 +172,26 @@ These paths are also hard-coded in:
   per frame and launches exact grids; `1` over-provisions the grids and skips the sync.
   Measured on RTX 4090 / 3.94M particles, `0` is ~2% faster (over-provisioned block scheduling
   costs more than the sync).
-- **`__launch_bounds__(64, 10)` is enabled on the hybrid kernels** and validated spill-free
-  on RTX 5090 / `sm_120` (register path density: 39 regs, force: 72 regs; no stack/local).
+- **Tuned launch bounds are enabled on the hybrid kernels:** density uses
+  `__launch_bounds__(64, 24)` and force uses `__launch_bounds__(64, 14)`. The final headless
+  register build on RTX 5090 / `sm_120` is spill-free: density uses 39 registers for the mixed
+  template and 38 for SMS-only with 2336 B shared; force uses 67 registers and 3328 B shared.
   Recheck with `cuobjdump -res-usage` after kernel edits or when changing the target architecture.
+- **Invariant SPH coefficients are precomputed on the host.** The live kernels consume
+  `inv_rest_density`, `density_scale`, `half_spiky_value`, `viscosity_visco_value`,
+  `grad_color_scale`, and `lplc_color_scale`; do not re-expand these into per-particle products
+  or division.
+- **Live scheduling avoids redundant memory traffic.** Empty cells return before coordinate and
+  neighbor work; six axial neighbors use direct linear offsets; the physical sort no longer
+  stores a temporary coarse-cell offset that the next pass immediately overwrites.
+- **Thrust has been removed.** All scans and legacy key/pair sorts use CUB. `Arrangement`
+  allocates one `d_cub_temp_` buffer at initialization sized to the maximum of every
+  `DeviceScan`/`DeviceRadixSort` request, plus persistent key/value alternate buffers. Do not
+  reintroduce per-frame CUB temp queries/allocations or Thrust headers.
+- **The same-cell pair-force prototype is experimental and off by default.**
+  `GSPH_ENABLE_SAME_CELL_PAIR_FORCE=ON` computes same-cell pairs once using shared atomics, but
+  measured ~35.5 ms/frame versus ~22.8 ms for the normal gather force. It is retained only as a
+  reproducible research path, not as an optimized configuration.
 - **Particle buffers are sized by exact particle count.** `initializeScene` counts the fluid
   blocks before allocating; `recomm_nump` in the scene JSON is only a fallback. (Previously
   `recomm_nump: 15500000` over-allocated ~1.9 GB of device/pinned memory for the default

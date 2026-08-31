@@ -63,7 +63,16 @@ void launchForceHybridKernel(
     ParticleIdxRange tra_range, ParticleBufferList buffers,
     int *compact_indices, int *cell_offsets, int *cell_particle_counts,
     const BlockTask *block_tasks, const int *device_sms_task_count,
-    const int *device_middle);
+    const int *device_middle
+#if GSPH_ENABLE_SAME_CELL_PAIR_FORCE
+    , const SameCellForceAccum *same_cell_force_accum
+#endif
+    );
+#if GSPH_ENABLE_SAME_CELL_PAIR_FORCE
+void launchSameCellPairForceKernel(
+    int cell_count, ParticleBufferList buffers, const int *cell_offsets,
+    const int *cell_particle_counts, SameCellForceAccum *output);
+#endif
 
 }
 

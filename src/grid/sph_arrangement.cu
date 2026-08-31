@@ -8,14 +8,14 @@
 
 #include "grid/sph_arrangement.h"
 #include <device_launch_parameters.h>
-#include <thrust/sort.h>
-#include <thrust/device_ptr.h>
 #include <cub/device/device_scan.cuh>
+#include <cub/device/device_radix_sort.cuh>
 #include "cuda_prescan/scan.cuh"
 #include "io/gpu_model.cuh"
 #include "core/sph_utils.cuh"
 
 #include<fstream>
+#include <vector>
 
 namespace sph
 {
@@ -84,26 +84,26 @@ void CountingSort_Offset(int *cell_offset, int cellNum, int iSize)
     }
 }
 
-__global__ void CountingSort_Cell_Sum_two_M(int* hashp, int *p_offset, int *hashId, int *cell_numbers, int iSize, int *block_reqs, int numc)
+__global__ void CountingSort_Cell_Sum_two_M(
+    int *__restrict__ hashp, int *__restrict__ p_offset,
+    const int *__restrict__ hashId, int *__restrict__ cell_numbers,
+    int iSize, const int *__restrict__ block_reqs, int numc,
+    const int *__restrict__ cell_offsets)
 {
-	int x_id = __umul24(blockDim.x, blockIdx.x) + threadIdx.x;
-	if (x_id < iSize)
-	{
-		int selfHash = (hashId[x_id] >> 6);
-		//selfHash = block_reqs[selfHash] > 0 ? (selfHash + numc) : selfHash;
+    const int particle_index =
+        __umul24(blockDim.x, blockIdx.x) + threadIdx.x;
+    if (particle_index >= iSize) return;
 
+    const int coarse_cell = hashId[particle_index] >> 6;
+    const int offset_in_cell =
+        particle_index - cell_offsets[coarse_cell];
+    const int destination_cell =
+        block_reqs[coarse_cell] * kSmsTaskParticles > offset_in_cell
+        ? coarse_cell + numc : coarse_cell;
 
-		selfHash = block_reqs[selfHash] * kSmsTaskParticles > p_offset[x_id] ? (selfHash + numc) : selfHash;
-		/*   int thd = block_reqs[selfHash] * 32;
-		if (thd <= p_offset[x_id]){
-		selfHash = selfHash;
-		}
-		else{
-		selfHash = (selfHash + numc);
-		}*/
-		hashp[x_id] = selfHash;
-		p_offset[x_id] = atomicAdd(cell_numbers + selfHash, 1);
-	}
+    hashp[particle_index] = destination_cell;
+    p_offset[particle_index] = atomicAdd(
+        &cell_numbers[destination_cell], 1);
 }
 __global__ void clean_data(int *cell_Numx, int numc)
 {
@@ -414,7 +414,7 @@ void Arrangement::CountingSortCUDA_Two()
 
     CountingSort_Cell_Sum_two <<<num_block, num_thread >>>(d_p_offset_, d_hash_, cell_num_two, nump_, d_block_reqs_, numc_);
 
-    cub::DeviceScan::InclusiveSum(d_cub_scan_temp_, cub_scan_temp_bytes_,
+    cub::DeviceScan::InclusiveSum(d_cub_temp_, cub_temp_bytes_,
                                   cell_num_two, cell_num_two, numCell);
 
     CountingSort_Result_two <<<num_block, num_thread >>>(d_p_offset_, d_hash_, hashp, cell_num_two, nump_, buff_list_.get_buff_list(), buff_temp_.get_buff_list());
@@ -613,9 +613,10 @@ Arrangement::Arrangement(ParticleBufferObject &buff_list, ParticleBufferObject &
     //CUDA_SAFE_CALL(cudaMalloc(&d_end_index_, numc_ * sizeof(int)));
     CUDA_SAFE_CALL(cudaMalloc(&d_hash_, nump_capacity * sizeof(int)));
     CUDA_SAFE_CALL(cudaMalloc(&d_index_, nump_capacity * sizeof(int)));
+    CUDA_SAFE_CALL(cudaMalloc(&d_index_alt_, nump_capacity * sizeof(int)));
     // SMS
 	CUDA_SAFE_CALL(cudaMalloc(&d_hash_p, nump_capacity * sizeof(int)));
-    CUDA_SAFE_CALL(cudaMalloc(&hashp, nump_ * sizeof(int)));
+    CUDA_SAFE_CALL(cudaMalloc(&hashp, nump_capacity * sizeof(int)));
     //CUDA_SAFE_CALL(cudaMalloc(&indexp, nump_ * sizeof(int)));
 
     CUDA_SAFE_CALL(cudaMalloc(&d_block_reqs_, numc_ * sizeof(int)));
@@ -634,14 +635,20 @@ Arrangement::Arrangement(ParticleBufferObject &buff_list, ParticleBufferObject &
         + numc_ + kSmsTasksPerBlock;
     CUDA_SAFE_CALL(cudaMalloc(&d_block_task_,
                               task_capacity * sizeof(BlockTask)));
+#if GSPH_ENABLE_SAME_CELL_PAIR_FORCE
+    CUDA_SAFE_CALL(cudaMalloc(
+        &d_same_cell_force_accum_,
+        nump_capacity_ * sizeof(SameCellForceAccum)));
+#endif
     CUDA_SAFE_CALL(cudaMalloc(&d_num_block_, sizeof(int)));
 
-    CUDA_SAFE_CALL(cudaMalloc(&d_middle_value_, sizeof(int)));
-    CUDA_SAFE_CALL(cudaMallocHost(&h_middle_value_pinned_, sizeof(int)));
-
-
-    CUDA_SAFE_CALL(cudaMalloc(&d_num_cta_, sizeof(int)));
-    CUDA_SAFE_CALL(cudaMallocHost(&h_num_cta_pinned_, sizeof(int)));
+    CUDA_SAFE_CALL(cudaMalloc(&d_hybrid_counts_, 2 * sizeof(int)));
+    d_middle_value_ = d_hybrid_counts_;
+    d_num_cta_ = d_hybrid_counts_ + 1;
+    CUDA_SAFE_CALL(cudaMallocHost(
+        &h_hybrid_counts_pinned_, 2 * sizeof(int)));
+    h_middle_value_pinned_ = h_hybrid_counts_pinned_;
+    h_num_cta_pinned_ = h_hybrid_counts_pinned_ + 1;
 
     CUDA_SAFE_CALL(cudaMalloc(&d_cell_offset_, (numc_+1) * sizeof(int)));
 
@@ -657,23 +664,12 @@ Arrangement::Arrangement(ParticleBufferObject &buff_list, ParticleBufferObject &
 	CUDA_SAFE_CALL(cudaMalloc(&d_cell_offset_M, (numc_ * 64 + 1) * sizeof(int)));
 	CUDA_SAFE_CALL(cudaMalloc(&d_cell_nump_M, (numc_ * 64 + 1) * sizeof(int)));
 
-    // Preallocate CUB scan temp storage once for the largest scan used on the frame path.
-    {
-        size_t bytes_for_cell_m = 0;
-        size_t bytes_for_block_reqs = 0;
-        cub::DeviceScan::ExclusiveSum(nullptr, bytes_for_cell_m,
-                                       d_cell_nump_M, d_cell_offset_M, numc_ * 64 + 1);
-        cub::DeviceScan::ExclusiveSum(nullptr, bytes_for_block_reqs,
-                                       d_block_reqs_, d_task_array_offset_32_, numc_);
-        cub_scan_temp_bytes_ = (bytes_for_cell_m > bytes_for_block_reqs) ? bytes_for_cell_m : bytes_for_block_reqs;
-        CUDA_SAFE_CALL(cudaMalloc(&d_cub_scan_temp_, cub_scan_temp_bytes_));
-    }
+    allocateCubTempStorage();
 
     preallocBlockSumsInt(numc_);
 
     CUDA_SAFE_CALL(cudaMemset(d_num_cta_, 0, sizeof(int)));
 
-    gpu_model::allocateGPUModel(p_gpu_model_);
 }
 
 Arrangement::~Arrangement()
@@ -692,32 +688,73 @@ Arrangement::~Arrangement()
     CUDA_SAFE_CALL(cudaFree(d_hash_));
 	CUDA_SAFE_CALL(cudaFree(d_hash_p));
     CUDA_SAFE_CALL(cudaFree(d_index_));
+    CUDA_SAFE_CALL(cudaFree(d_index_alt_));
     CUDA_SAFE_CALL(cudaFree(d_block_reqs_));
     CUDA_SAFE_CALL(cudaFree(d_breqs_offset_));
     CUDA_SAFE_CALL(cudaFree(d_block_task_));
+#if GSPH_ENABLE_SAME_CELL_PAIR_FORCE
+    CUDA_SAFE_CALL(cudaFree(d_same_cell_force_accum_));
+#endif
     CUDA_SAFE_CALL(cudaFree(d_num_block_));
-    CUDA_SAFE_CALL(cudaFree(d_middle_value_));
-    if (h_middle_value_pinned_) CUDA_SAFE_CALL(cudaFreeHost(h_middle_value_pinned_));
+    CUDA_SAFE_CALL(cudaFree(d_hybrid_counts_));
+    d_hybrid_counts_ = nullptr;
+    d_middle_value_ = nullptr;
+    d_num_cta_ = nullptr;
+    if (h_hybrid_counts_pinned_)
+        CUDA_SAFE_CALL(cudaFreeHost(h_hybrid_counts_pinned_));
+    h_hybrid_counts_pinned_ = nullptr;
+    h_middle_value_pinned_ = nullptr;
+    h_num_cta_pinned_ = nullptr;
     //CUDA_SAFE_CALL(cudaFree(cell_num_));
     CUDA_SAFE_CALL(cudaFree(cell_num_two));
 
-    CUDA_SAFE_CALL(cudaFree(d_num_cta_));
-    if (h_num_cta_pinned_) CUDA_SAFE_CALL(cudaFreeHost(h_num_cta_pinned_));
     //CUDA_SAFE_CALL(cudaFree(d_cell_offset_data));
     CUDA_SAFE_CALL(cudaFree(d_cell_offset_));
     CUDA_SAFE_CALL(cudaFree(d_cell_nump_));
 	CUDA_SAFE_CALL(cudaFree(d_cell_offset_M));
 	CUDA_SAFE_CALL(cudaFree(d_cell_nump_M));
 
-    if (d_cub_scan_temp_) {
-        CUDA_SAFE_CALL(cudaFree(d_cub_scan_temp_));
-        d_cub_scan_temp_ = nullptr;
-        cub_scan_temp_bytes_ = 0;
+    if (d_cub_temp_) {
+        CUDA_SAFE_CALL(cudaFree(d_cub_temp_));
+        d_cub_temp_ = nullptr;
+        cub_temp_bytes_ = 0;
     }
 
     deallocBlockSumsInt();
 
-    gpu_model::freeGPUModel(p_gpu_model_);
+}
+
+void Arrangement::allocateCubTempStorage()
+{
+    size_t bytes_for_cell_scan = 0;
+    size_t bytes_for_task_scan = 0;
+    size_t bytes_for_key_sort = 0;
+    size_t bytes_for_pair_sort = 0;
+    const int particle_capacity = static_cast<int>(nump_capacity_);
+
+    CUDA_SAFE_CALL(cub::DeviceScan::ExclusiveSum(
+        nullptr, bytes_for_cell_scan, d_cell_nump_M, d_cell_offset_M,
+        numc_ * 64 + 1));
+    CUDA_SAFE_CALL(cub::DeviceScan::ExclusiveSum(
+        nullptr, bytes_for_task_scan, d_block_reqs_,
+        d_task_array_offset_32_, numc_));
+    CUDA_SAFE_CALL(cub::DeviceRadixSort::SortKeys(
+        nullptr, bytes_for_key_sort, d_hash_, hashp,
+        particle_capacity));
+    CUDA_SAFE_CALL(cub::DeviceRadixSort::SortPairs(
+        nullptr, bytes_for_pair_sort, d_hash_, hashp,
+        d_index_, d_index_alt_, particle_capacity));
+
+    cub_temp_bytes_ = bytes_for_cell_scan;
+    if (cub_temp_bytes_ < bytes_for_task_scan)
+        cub_temp_bytes_ = bytes_for_task_scan;
+    if (cub_temp_bytes_ < bytes_for_key_sort)
+        cub_temp_bytes_ = bytes_for_key_sort;
+    if (cub_temp_bytes_ < bytes_for_pair_sort)
+        cub_temp_bytes_ = bytes_for_pair_sort;
+
+    if (d_cub_temp_) CUDA_SAFE_CALL(cudaFree(d_cub_temp_));
+    CUDA_SAFE_CALL(cudaMalloc(&d_cub_temp_, cub_temp_bytes_));
 }
 
 int Arrangement::arrangeTRAMode()
@@ -844,11 +881,15 @@ void knArrangeTasksFixed(BlockTask *block_tasks, int *num_block, int *block_reqs
         }*/
     }
 }
+
 __global__
-void knArrangeIndependentSmsTasks(
-    const int *hash, const int *cell_offsets, const int *cell_particle_counts,
-    BlockTask *block_tasks, int *total_task_count,
-    const int *cell_task_counts, const int *cell_task_offsets, int cell_count)
+void knArrangeSmsTasks(
+    const int *__restrict__ hash, const int *__restrict__ cell_offsets,
+    const int *__restrict__ cell_particle_counts,
+    BlockTask *__restrict__ block_tasks, int *total_task_count,
+    const int *__restrict__ cell_task_counts,
+    const int *__restrict__ cell_task_offsets, int cell_count,
+    ushort3 grid_size)
 {
     const int cell_id = threadIdx.x + __umul24(blockDim.x, blockIdx.x);
     if (cell_id >= cell_count) return;
@@ -857,6 +898,14 @@ void knArrangeIndependentSmsTasks(
     const int particle_count = cell_particle_counts[cell_id];
     const int task_begin = cell_task_offsets[cell_id];
     const int task_count = cell_task_counts[cell_id];
+    if (task_count == 0)
+    {
+        if (cell_id == cell_count - 1)
+            *total_task_count = task_begin;
+        return;
+    }
+
+    const ushort3 cell_pos = CellIdx2CellPos(cell_id, grid_size);
 
     for (int local_task = 0; local_task < task_count; ++local_task)
     {
@@ -875,6 +924,9 @@ void knArrangeIndependentSmsTasks(
 
         BlockTask task;
         task.cellid = cell_id;
+        task.cell_pos = cell_pos;
+        task.cell_begin = particle_begin;
+        task.cell_particle_count = particle_count;
         task.p_offset = static_cast<unsigned short>(particle_offset);
         task.isSame = 0;
         task.xxi = static_cast<char>(min_x);
@@ -902,6 +954,9 @@ void knArrangeIndependentSmsTasks(
             task.yyi = 0;
             task.yyy = 3;
         }
+        task.paired_bounds = packSmsTaskBounds(
+            task.xxi, task.xxx, task.yyi,
+            task.yyy, task.zzi, task.zzz);
         block_tasks[task_begin + local_task] = task;
     }
 
@@ -909,56 +964,61 @@ void knArrangeIndependentSmsTasks(
         *total_task_count = task_begin + task_count;
 }
 __global__
-void judgeTask(BlockTask *block_tasks, int *num_block) {
-	unsigned int idx = threadIdx.x + __umul24(blockDim.x, blockIdx.x);
-	int numb = num_block[0];
-	if (idx >= numb) return;
-	if (numb % 2 == 0){
-		if (idx % 2 == 0){
-			if (block_tasks[idx].cellid == block_tasks[idx + 1].cellid){
-				block_tasks[idx].isSame = 1;
-				block_tasks[idx + 1].isSame = 1;
-				if (block_tasks[idx].xxi == block_tasks[idx + 1].xxx){
-					block_tasks[idx].zzz = block_tasks[idx + 1].zzz;
-				}
-				else{
-					block_tasks[idx].zzi = 0;// block_tasks[idx + 1].zzz;
-					block_tasks[idx].zzz = 3;
-				}
-				block_tasks[idx].xxx = block_tasks[idx + 1].xxx;
-			}
-			else{
-				block_tasks[idx].isSame = 0;
-				block_tasks[idx + 1].isSame = 0;
-			}
-		}
-	}
-	else{
-		if (idx % 2 == 0 && idx<numb - 1){
-			if (block_tasks[idx].cellid == block_tasks[idx + 1].cellid){
-				block_tasks[idx].isSame = 1;
-				block_tasks[idx + 1].isSame = 1;
-				if (block_tasks[idx].xxi == block_tasks[idx + 1].xxx){
-					block_tasks[idx].zzz = block_tasks[idx + 1].zzz;
-				}
-				else{
-					block_tasks[idx].zzi = 0;// block_tasks[idx + 1].zzz;
-					block_tasks[idx].zzz = 3;
-				}
-				block_tasks[idx].xxx = block_tasks[idx + 1].xxx;
-			}
-			else{
-				block_tasks[idx].isSame = 0;
-				block_tasks[idx + 1].isSame = 0;
-			}
-		}
-		if (idx == numb - 1){
-			block_tasks[idx].isSame = 1;
-			block_tasks[idx + 1].isSame = 1;
-			block_tasks[idx + 1].cellid = block_tasks[idx].cellid;
-			block_tasks[idx + 1].p_offset = block_tasks[idx].p_offset + 32;
-		}
-	}
+void judgeTask(BlockTask *block_tasks, const int *num_block)
+{
+    const int pair_index =
+        threadIdx.x + __umul24(blockDim.x, blockIdx.x);
+    const int first_index = pair_index << 1;
+    const int task_count = __ldg(num_block);
+    if (first_index >= task_count) return;
+
+    const int second_index = first_index + 1;
+    if (second_index >= task_count)
+    {
+        // Preserve the historical odd-tail descriptor semantics.
+        block_tasks[first_index].isSame = 1;
+        block_tasks[second_index].isSame = 1;
+        block_tasks[second_index].cellid =
+            block_tasks[first_index].cellid;
+        block_tasks[second_index].cell_pos =
+            block_tasks[first_index].cell_pos;
+        block_tasks[second_index].cell_begin =
+            block_tasks[first_index].cell_begin;
+        block_tasks[second_index].cell_particle_count =
+            block_tasks[first_index].cell_particle_count;
+        block_tasks[second_index].p_offset =
+            block_tasks[first_index].p_offset + kSmsTaskParticles;
+        return;
+    }
+
+    if (block_tasks[first_index].cellid !=
+        block_tasks[second_index].cellid)
+    {
+        block_tasks[first_index].isSame = 0;
+        block_tasks[second_index].isSame = 0;
+        return;
+    }
+
+    block_tasks[first_index].isSame = 1;
+    block_tasks[second_index].isSame = 1;
+    int paired_min_z = block_tasks[first_index].zzi;
+    int paired_max_z = block_tasks[first_index].zzz;
+    if (block_tasks[first_index].xxi ==
+        block_tasks[second_index].xxx)
+    {
+        paired_max_z = block_tasks[second_index].zzz;
+    }
+    else
+    {
+        paired_min_z = 0;
+        paired_max_z = 3;
+    }
+    block_tasks[first_index].paired_bounds = packSmsTaskBounds(
+        block_tasks[first_index].xxi,
+        block_tasks[second_index].xxx,
+        block_tasks[first_index].yyi,
+        block_tasks[first_index].yyy,
+        paired_min_z, paired_max_z);
 }
 
 __global__
@@ -971,7 +1031,7 @@ void padIndependentSmsTasks(BlockTask *block_tasks,
     block_tasks[task_count].p_offset += kSmsTaskParticles;
 }
 
-void Arrangement::arrangeIndependentSmsTasks(
+void Arrangement::arrangeSmsTasks(
     const int *hash, const int *cell_offsets,
     const int *cell_particle_counts, BlockTask *tasks,
     const int *cell_task_counts, const int *cell_task_offsets)
@@ -979,18 +1039,34 @@ void Arrangement::arrangeIndependentSmsTasks(
     constexpr int thread_count = 128;
     const int block_count = ceil_int(numc_, thread_count);
 
-    knArrangeIndependentSmsTasks<<<block_count, thread_count>>>(
+    knArrangeSmsTasks<<<block_count, thread_count>>>(
         hash, cell_offsets, cell_particle_counts, tasks, d_num_cta_,
-        cell_task_counts, cell_task_offsets, numc_);
+        cell_task_counts, cell_task_offsets, numc_, grid_size_);
 
-#if HYBRID_DEVICE_GRID_SIZING
-	padIndependentSmsTasks<<<1, 1>>>(tasks, d_num_cta_);
-#else
-	CUDA_SAFE_CALL(cudaMemcpyAsync(h_num_cta_pinned_, d_num_cta_, sizeof(int), cudaMemcpyDeviceToHost, 0));
+#if !HYBRID_DEVICE_GRID_SIZING
+	CUDA_SAFE_CALL(cudaMemcpyAsync(
+        h_hybrid_counts_pinned_, d_hybrid_counts_, 2 * sizeof(int),
+        cudaMemcpyDeviceToHost, 0));
 	CUDA_SAFE_CALL(cudaStreamSynchronize(0));
 	h_num_cta_ = *h_num_cta_pinned_;
 	middle_value_ = *h_middle_value_pinned_;
-	padIndependentSmsTasks<<<1, 1>>>(tasks, d_num_cta_);
+#endif
+
+#if GSPH_ENABLE_HISTORICAL_ISSAME
+#if HYBRID_DEVICE_GRID_SIZING
+    // Match the historical no-readback launch: judgeTask reads the actual
+    // count on device and excess threads exit immediately.
+    const int task_bound = ceil_int(nump_, kSmsTaskParticles) + numc_;
+    const int pair_bound = ceil_int(task_bound, kSmsTasksPerBlock);
+    judgeTask<<<ceil_int(pair_bound, thread_count), thread_count>>>(
+        tasks, d_num_cta_);
+#else
+    const int pair_count = ceil_int(h_num_cta_, kSmsTasksPerBlock);
+    judgeTask<<<ceil_int(pair_count, thread_count), thread_count>>>(
+        tasks, d_num_cta_);
+#endif
+#else
+    padIndependentSmsTasks<<<1, 1>>>(tasks, d_num_cta_);
 #endif
 }
 
@@ -1004,7 +1080,7 @@ void Arrangement::arrangeBlockTasksFixed(BlockTask* d_task_array, int* d_cta_req
     CUDA_SAFE_CALL(cudaStreamSynchronize(0));
     h_num_cta_ = *h_num_cta_pinned_;
 
-	judgeTask << <ceil_int(h_num_cta_, num_thread), num_thread >> >(d_task_array, d_num_cta_);
+	judgeTask << <ceil_int(ceil_int(h_num_cta_, kSmsTasksPerBlock), num_thread), num_thread >> >(d_task_array, d_num_cta_);
 
 	//BlockTask *h_task = new BlockTask[h_num_cta_[0]];
 	//std::ofstream outt("hkhkhkhkhkhkhkhkhkhkhkhkhkhkhkhkhkhkhkhkhk.txt");
@@ -1047,7 +1123,7 @@ void Arrangement::assignTasksFixedCTA() {
     CUDA_SAFE_CALL(cudaMemcpyAsync(h_num_cta_pinned_, d_num_cta_, sizeof(int), cudaMemcpyDeviceToHost, 0));
     CUDA_SAFE_CALL(cudaStreamSynchronize(0));
     h_num_cta_ = *h_num_cta_pinned_;
-	judgeTask << <ceil_int(h_num_cta_, num_thread), num_thread >> >(d_block_task_, d_num_cta_);
+	judgeTask << <ceil_int(ceil_int(h_num_cta_, kSmsTasksPerBlock), num_thread), num_thread >> >(d_block_task_, d_num_cta_);
 }
 
 
@@ -1230,24 +1306,27 @@ void Arrangement::CountingSort_O()
 
 }
 
-__global__ void CountingSort_Result_M(int *p_offset_p, int *p_offset, int *hash, int *hash_new, int *cell_offset, int num, ParticleBufferList old_data, ParticleBufferList new_data)
+__global__ void CountingSort_Result_M(
+    const int *__restrict__ p_offset, const int *__restrict__ hash,
+    int *__restrict__ hash_new, const int *__restrict__ cell_offset,
+    int num, ParticleBufferList old_data, ParticleBufferList new_data)
 {
-	int id = __umul24(blockDim.x, blockIdx.x) + threadIdx.x;
-	if (id < num)
-	{
-		int x_id = hash[id];
-		int iStart = cell_offset[x_id];
-		int p_id = iStart + p_offset[id];
-		hash_new[p_id] = x_id;
-		int ici = (x_id & 0xffffffc0);
-		p_offset_p[p_id] = p_offset[id] + iStart - cell_offset[ici];
+    const int source_index =
+        __umul24(blockDim.x, blockIdx.x) + threadIdx.x;
+    if (source_index >= num) return;
 
-		new_data.position_d[p_id] = old_data.position_d[id];
-		new_data.velocity[p_id] = old_data.velocity[id];
-		new_data.evaluated_velocity[p_id] = old_data.evaluated_velocity[id];
-		new_data.color[p_id] = old_data.color[id];
-		//        new_data.phase[p_id] = old_data.phase[id];
-	}
+    const int micro_cell = hash[source_index];
+    const int destination_index =
+        cell_offset[micro_cell] + p_offset[source_index];
+    hash_new[destination_index] = micro_cell;
+
+    new_data.position_d[destination_index] =
+        old_data.position_d[source_index];
+    new_data.velocity[destination_index] = old_data.velocity[source_index];
+    new_data.evaluated_velocity[destination_index] =
+        old_data.evaluated_velocity[source_index];
+    // Density overwrites color for every live TRA/SMS particle later in the
+    // same frame, so carrying it through the sort is wasted bandwidth.
 }
 __global__ void CountingSort_Cell_SumM(int *p_offset, int *hashId, int *cell_numbers, int iSize, float4 *position, float inv_cell_size, ushort3 grid_size)
 {
@@ -1276,22 +1355,24 @@ void Arrangement::CountingSort_O_M()
 	int num_thread = 256;
 	int num_block = ceil_int(nump_, num_thread);
 	int numCN = (numc_ <<6);
-	int num_blockc = ceil_int(numCN + 1, num_thread);
 
-	CUDA_SAFE_CALL(cudaMemsetAsync(d_cell_nump_M, 0x00, sizeof(int)* (numCN+1), 0));
-
-	//clean_data << <num_blockc, num_thread >> >(d_cell_nump_M, numCN);
-	
-	CountingSort_Cell_SumM << <num_block, num_thread >> >(d_p_offset_, d_hash_, d_cell_nump_M, nump_, buff_list_.get_buff_list().position_d, inv_cell_size_, grid_size_);
+	CUDA_SAFE_CALL(cudaMemsetAsync(
+		d_cell_nump_M, 0x00, sizeof(int) * (numCN + 1), 0));
+	CountingSort_Cell_SumM<<<num_block, num_thread>>>(
+		d_p_offset_, d_hash_, d_cell_nump_M, nump_,
+		buff_list_.get_buff_list().position_d,
+		inv_cell_size_, grid_size_);
 
 	//cudaMemcpy(d_cell_offset_M + 1, d_cell_nump_M, sizeof(int)* numCN, cudaMemcpyDeviceToDevice);
 	//CountingSort_Offest_P(num_blockc, num_thread, d_cell_offset_M, numCN + 1);
 
 
-	cub::DeviceScan::ExclusiveSum(d_cub_scan_temp_, cub_scan_temp_bytes_,
+	cub::DeviceScan::ExclusiveSum(d_cub_temp_, cub_temp_bytes_,
                                   d_cell_nump_M, d_cell_offset_M, numCN + 1);
 
-	CountingSort_Result_M << <num_block, num_thread >> >(d_p_offset_p, d_p_offset_, d_hash_, hashp, d_cell_offset_M, nump_, buff_list_.get_buff_list(), buff_temp_.get_buff_list());
+	CountingSort_Result_M<<<num_block, num_thread>>>(
+        d_p_offset_, d_hash_, hashp, d_cell_offset_M, nump_,
+        buff_list_.get_buff_list(), buff_temp_.get_buff_list());
 
 	calculate_cell_info << <ceil_int(numc_, num_thread), num_thread >> >(d_cell_nump_, d_cell_offset_, d_cell_offset_M, numc_);
 
@@ -1312,7 +1393,6 @@ void Arrangement::CountingSort_O_M()
 	hashp = p;
 	buff_list_.swapObj(buff_temp_);
 }
-
 
 void Arrangement::CountingSortCUDA_Two9()
 {
@@ -1365,7 +1445,7 @@ void Arrangement::CountingSortCUDA_Two9()
 
 
 
-    cub::DeviceScan::InclusiveSum(d_cub_scan_temp_, cub_scan_temp_bytes_,
+    cub::DeviceScan::InclusiveSum(d_cub_temp_, cub_temp_bytes_,
                                   cell_num_two, cell_num_two, numCell);
     CountingSort_Result_two9 << <num_block, num_thread >> >(d_p_offset_p, d_hash_, hashp, cell_num_two, d_index_, nump_);
     unsigned int shared_mem_size = (num_thread + 1) * sizeof(int);
@@ -1387,26 +1467,24 @@ void Arrangement::CountingSortCUDA_Two9_M()
 
 	//clean_data << <num_blockc, num_thread >> >(cell_num_two, numCell+1);
 	
-	CountingSort_Cell_Sum_two_M << <num_block, num_thread >> >(d_hash_p, d_p_offset_p, d_hash_, cell_num_two, nump_, d_block_reqs_, numc_);
-	cub::DeviceScan::InclusiveSum(d_cub_scan_temp_, cub_scan_temp_bytes_,
+	CountingSort_Cell_Sum_two_M<<<num_block, num_thread>>>(
+        d_hash_p, d_p_offset_p, d_hash_, cell_num_two, nump_,
+        d_block_reqs_, numc_, d_cell_offset_);
+	cub::DeviceScan::InclusiveSum(d_cub_temp_, cub_temp_bytes_,
                                   cell_num_two, cell_num_two, numCell);
-
-	//thrust::inclusive_scan(thrust::device_ptr<int>(cell_num_two), thrust::device_ptr<int>(cell_num_two) +numCell, thrust::device_ptr<int>(cell_num_two));
-
 
 	CountingSort_Result_two9 << <num_block, num_thread >> >(d_p_offset_p, d_hash_p, hashp, cell_num_two, d_index_, nump_);
 	unsigned int shared_mem_size = (num_thread + 1) * sizeof(int);
 	CUDA_SAFE_CALL(cudaMemsetAsync(d_middle_value_, 0xFF, sizeof(int), 0));
 	knFindHybridModeMiddleValue << <num_block, num_thread, shared_mem_size >> >(numc_, d_middle_value_, hashp, nump_);
-#if !HYBRID_DEVICE_GRID_SIZING
-	    CUDA_SAFE_CALL(cudaMemcpyAsync(h_middle_value_pinned_, d_middle_value_, sizeof(int), cudaMemcpyDeviceToHost, 0));
-    // Sync is deferred to arrangeIndependentSmsTasks() so both scalar reads can share one stream sync.
-#endif
+    // Both contiguous launch counts are copied once after SMS task generation
+    // in arrangeSmsTasks(), immediately before their shared stream sync.
 }
 
 int Arrangement::arrangeHybridMode9(){
     CountingSort_O();
-    gpu_model::calculateBlockRequirementHybridMode(cell_type, d_cell_nump_, d_block_reqs_, p_gpu_model_,d_cell_offset_, d_cell_nump_,grid_size_, 32);
+    gpu_model::calculateBlockRequirementHybridMode(
+        d_cell_nump_, d_block_reqs_, grid_size_);
     CountingSortCUDA_Two9();
     prescanArrayRecursiveInt(d_task_array_offset_32_, d_block_reqs_, numc_, 0);
     arrangeBlockTasksFixed(d_block_task_, d_block_reqs_, d_task_array_offset_32_, 32);
@@ -1416,12 +1494,11 @@ void Arrangement::arrangeHybridFrame()
 {
     CountingSort_O_M();
     gpu_model::calculateBlockRequirementHybridMode(
-        cell_type, d_cell_nump_, d_block_reqs_, p_gpu_model_,
-        d_cell_offset_, d_cell_nump_, grid_size_, kSmsTaskParticles);
+        d_cell_nump_, d_block_reqs_, grid_size_);
     CountingSortCUDA_Two9_M();
-    cub::DeviceScan::ExclusiveSum(d_cub_scan_temp_, cub_scan_temp_bytes_,
+    cub::DeviceScan::ExclusiveSum(d_cub_temp_, cub_temp_bytes_,
                                   d_block_reqs_, d_task_array_offset_32_, numc_);
-    arrangeIndependentSmsTasks(
+    arrangeSmsTasks(
         d_hash_, d_cell_offset_, d_cell_nump_, d_block_task_,
         d_block_reqs_, d_task_array_offset_32_);
     // The TRA/SMS split point stays on device (d_middle_value_); the physics
@@ -1439,9 +1516,8 @@ int Arrangement::arrangeHybridMode(){
     //CountingSortCUDA();
     countNum();
     //findCellRange();
-    gpu_model::calculateBlockRequirementHybridMode(cell_type, cell_num_, d_block_reqs_, p_gpu_model_,
-                                                   d_cell_offset_, d_cell_nump_,
-                                                   grid_size_, 32);
+    gpu_model::calculateBlockRequirementHybridMode(
+        cell_num_, d_block_reqs_, grid_size_);
 
     // sort particles
     //calculateHashWithBlockReq();
@@ -1516,6 +1592,49 @@ int Arrangement::getSmsTaskCount() const
     return h_num_cta_;
 }
 
+SmsTaskPairStats Arrangement::getSmsTaskPairStats() const
+{
+    SmsTaskPairStats stats;
+    int task_count = 0;
+    CUDA_SAFE_CALL(cudaMemcpy(
+        &task_count, d_num_cta_, sizeof(task_count),
+        cudaMemcpyDeviceToHost));
+    if (task_count <= 0) return stats;
+
+    const int descriptor_count = task_count + (task_count & 1);
+    std::vector<BlockTask> tasks(descriptor_count);
+    CUDA_SAFE_CALL(cudaMemcpy(
+        tasks.data(), d_block_task_,
+        descriptor_count * sizeof(BlockTask), cudaMemcpyDeviceToHost));
+    std::vector<int> cell_particle_counts(numc_);
+    CUDA_SAFE_CALL(cudaMemcpy(
+        cell_particle_counts.data(), d_cell_nump_,
+        numc_ * sizeof(int), cudaMemcpyDeviceToHost));
+    stats.total_pairs = (task_count + 1) / 2;
+    for (int task_index = 0; task_index < task_count;
+         task_index += kSmsTasksPerBlock)
+    {
+        const BlockTask &first = tasks[task_index];
+        const BlockTask &second = tasks[task_index + 1];
+        if (first.isSame != 0)
+        {
+            ++stats.is_same_pairs;
+            const int second_particle_count =
+                cell_particle_counts[first.cellid] - second.p_offset;
+            if (second_particle_count >= kSmsTaskParticles)
+                ++stats.full_is_same_pairs;
+            else
+                ++stats.partial_is_same_pairs;
+            if (first.xxi == second.xxx)
+                ++stats.compact_is_same_pairs;
+            else
+                ++stats.widened_is_same_pairs;
+        }
+        if (first.cellid == second.cellid) ++stats.same_cell_pairs;
+    }
+    return stats;
+}
+
 const BlockTask *Arrangement::getSmsTasks() const
 {
     return d_block_task_;
@@ -1528,10 +1647,25 @@ void Arrangement::resetNumParticle(unsigned int nump)
 	if (nump_capacity_ < nump_)
 	{
 		CUDA_SAFE_CALL(cudaFree(d_hash_));
+		CUDA_SAFE_CALL(cudaFree(hashp));
+		CUDA_SAFE_CALL(cudaFree(d_hash_p));
 		CUDA_SAFE_CALL(cudaFree(d_index_));
+		CUDA_SAFE_CALL(cudaFree(d_index_alt_));
+#if GSPH_ENABLE_SAME_CELL_PAIR_FORCE
+		CUDA_SAFE_CALL(cudaFree(d_same_cell_force_accum_));
+#endif
 		CUDA_SAFE_CALL(cudaMalloc(&d_hash_, nump_ * sizeof(int)));
+		CUDA_SAFE_CALL(cudaMalloc(&hashp, nump_ * sizeof(int)));
+		CUDA_SAFE_CALL(cudaMalloc(&d_hash_p, nump_ * sizeof(int)));
 		CUDA_SAFE_CALL(cudaMalloc(&d_index_, nump_ * sizeof(int)));
+		CUDA_SAFE_CALL(cudaMalloc(&d_index_alt_, nump_ * sizeof(int)));
+#if GSPH_ENABLE_SAME_CELL_PAIR_FORCE
+		CUDA_SAFE_CALL(cudaMalloc(
+			&d_same_cell_force_accum_,
+			nump_ * sizeof(SameCellForceAccum)));
+#endif
 		nump_capacity_ = nump_;
+		allocateCubTempStorage();
 	}
 }
 
@@ -1556,29 +1690,27 @@ void Arrangement::sortHash()
 {
     if (0 == nump_) return;
 
-    thrust::sort(thrust::device_ptr<int>(d_hash_),
-                 thrust::device_ptr<int>(d_hash_ + nump_));
+    CUDA_SAFE_CALL(cub::DeviceRadixSort::SortKeys(
+        d_cub_temp_, cub_temp_bytes_, d_hash_, hashp,
+        static_cast<int>(nump_)));
+    int *old_keys = d_hash_;
+    d_hash_ = hashp;
+    hashp = old_keys;
 }
 
 void Arrangement::sortIndexByHash()
 {
     if (0 == nump_) return;
 
-	const int size = nump_;
-	int *ha = new int[nump_];
-	int *in = new int[nump_];
-	cudaMemcpy(ha, d_hash_, size * sizeof(int), cudaMemcpyDeviceToHost);
-	cudaMemcpy(in, d_index_, size * sizeof(int), cudaMemcpyDeviceToHost);
-	thrust::sort_by_key(ha, ha + nump_, in);
-	cudaMemcpy(d_hash_, ha, size * sizeof(int), cudaMemcpyHostToDevice);
-	cudaMemcpy(d_index_, in, size * sizeof(int), cudaMemcpyHostToDevice);
-
-	free(ha);
-	free(in);
-
-    /*thrust::sort_by_key(thrust::device_ptr<int>(d_hash_),
-                        thrust::device_ptr<int>(d_hash_ + nump_),
-                        thrust::device_ptr<int>(d_index_));*/
+    CUDA_SAFE_CALL(cub::DeviceRadixSort::SortPairs(
+        d_cub_temp_, cub_temp_bytes_, d_hash_, hashp,
+        d_index_, d_index_alt_, static_cast<int>(nump_)));
+    int *old_keys = d_hash_;
+    d_hash_ = hashp;
+    hashp = old_keys;
+    int *old_values = d_index_;
+    d_index_ = d_index_alt_;
+    d_index_alt_ = old_values;
 }
 
 void Arrangement::reindexParticles()

@@ -29,9 +29,9 @@
 namespace sph
 {
 
-    // Validated production layout: one independent 32-particle task per warp,
-    // with two warps in each SMS block. Pairing adjacent tasks widens their
-    // spatial bounds and was measurably slower on the benchmark scene.
+    // One 32-particle task is assigned to each warp. Pairs marked by the
+    // historical judgeTask policy may share one 64-neighbor batch; all other
+    // pairs retain independent register iterators.
     constexpr int kSmsTaskParticles = 32;
     constexpr int kSmsBlockThreads = 64;
     constexpr int kSmsTasksPerBlock = kSmsBlockThreads / kSmsTaskParticles;

@@ -59,6 +59,9 @@ cmake -S . -B build-headless -G "Visual Studio 17 2022" -A x64 \
 The repository default is `sm_89`. Override it for another GPU, for example
 `-DCMAKE_CUDA_ARCHITECTURES=120` on RTX 5090.
 
+Release and RelWithDebInfo builds enable host IPO and CUDA device LTO by default. Disable it for
+toolchain compatibility or A/B testing with `-DGSPH_ENABLE_IPO=OFF`.
+
 If the dependencies are not on the default search path, point CMake at vcpkg:
 
 ```bash
@@ -100,9 +103,10 @@ build-headless/Release/gsph --benchmark 200
 
 The normal GUI build also accepts the same benchmark arguments and bypasses window creation at
 runtime, but it remains linked to the graphics libraries. Use the CMake option when graphics
-dependencies must be absent entirely.
+dependencies must be absent entirely. Headless kernels also omit the render-only color and
+`final_position` updates; GUI builds retain both.
 
-This prints wall-clock FPS, the TRA/SMS split, a deterministic state checksum, and per-stage
+This prints wall-clock FPS, the TRA/SMS split, a state checksum, and per-stage
 timings (grid arrange / density / force). `--headless N` is an alias.
 
 The optimized register SMS path is enabled by default. Configure an equivalent legacy shared
@@ -111,6 +115,30 @@ path build for A/B testing with:
 ```bash
 cmake -S . -B build-shared -DGSPH_USE_REGISTER_SMS=OFF
 ```
+
+The register build uses the project's historical `judgeTask` policy. Each globally aligned SMS
+task pair `(0,1), (2,3), ...` gets `isSame=1` exactly when both tasks have the same coarse
+`cellid`; `judgeTask` stores the historical combined bounds in the first descriptor's packed
+padding and handles an odd tail task. The original per-task bounds remain hot for independent
+register traversal, and there is no additional search-volume heuristic.
+
+Density uses cooperative staging for `isSame` pairs by default. Force keeps the original task
+bounds and stays on the faster independent register iterator. The controls are:
+
+```bash
+-DGSPH_ENABLE_HISTORICAL_ISSAME=OFF       # disable classification and task coloring
+-DGSPH_ENABLE_SMS_LOCAL_MERGE=OFF         # keep isSame/colors, disable density staging
+-DGSPH_ENABLE_SMS_LOCAL_MERGE_FORCE=ON    # experimental force staging (slower on RTX 5090)
+```
+
+Benchmark output reports the number and shape of paired tasks. In GUI builds the historical
+density-pass coloring is preserved: `isSame` SMS tasks are cyan, independent SMS tasks are
+yellow, and TRA particles remain magenta.
+
+The project contains no Thrust dependency. CUB scans and radix sorts share persistent device
+temporary storage allocated once by `Arrangement`; key/value alternate buffers are persistent as
+well. The optional `GSPH_ENABLE_SAME_CELL_PAIR_FORCE=ON` research prototype is intentionally off
+because shared-atomic pair accumulation is substantially slower on the default dense scene.
 
 ### Controls
 
@@ -153,9 +181,9 @@ Reference numbers for the default scene (~3.94M particles), measured with
 
 - **~35 FPS** (28.6 ms/frame): ~1.2 ms grid arrange, ~9.5 ms density, ~20 ms force
 
-On RTX 5090 / CUDA 13.2 / native `sm_120`, three interleaved 200-frame runs measured
-23.009 ms/frame for the shared path and 21.112 ms/frame for the register path
-(~8.99% throughput improvement).
+On RTX 5090 / CUDA 13.2 / native `sm_120`, the final two interleaved 1000-frame runs per variant
+measured 22.901 ms/frame for the shared path and 21.833 ms/frame for the register path
+(~4.89% throughput improvement, or ~4.66% lower frame time).
 
 See `agent_docs/optimization_report.md` for the measured optimization history, including
 evaluated-and-rejected experiments (device-side grid sizing, neighbor-batch prefetching).

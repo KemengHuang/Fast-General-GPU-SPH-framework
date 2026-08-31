@@ -178,6 +178,14 @@ inline void defaultInitializeSPHSysPara(SystemParameter &sys_para, Scene *scene)
     // as-is to preserve behavior; fix to 3.0f / 4.0f if it ever gets used.
     sys_para.self_lplc_color = sys_para.lplc_poly6 * sys_para.mass * sys_para.kernel_2 * (0 - 3 / 4 * sys_para.kernel_2);
 
+    sys_para.inv_rest_density = 1.0f / sys_para.rest_density;
+    sys_para.density_scale = sys_para.mass * sys_para.poly6_value;
+    sys_para.half_spiky_value = sys_para.spiky_value * 0.5f;
+    sys_para.viscosity_visco_value =
+        sys_para.viscosity * sys_para.visco_value;
+    sys_para.grad_color_scale = sys_para.grad_poly6 * sys_para.mass;
+    sys_para.lplc_color_scale = sys_para.lplc_poly6 * sys_para.mass;
+
     sys_para.bound_interval = sys_para.kernel;
     sys_para.bound_min = make_float3(sys_para.bound_interval, sys_para.bound_interval, sys_para.bound_interval);
     sys_para.bound_max = make_float3(sys_para.world_size.x - sys_para.bound_interval,
@@ -294,7 +302,12 @@ void HybridSystem::tick()
         arrangement_->getSmsTasks(), arrangement_->getSmsTaskCount(),
         arrangement_->getDeviceSmsTaskCount(),
         arrangement_->getDeviceTraParticleCount(),
-        sms_task_upper_bound);
+        sms_task_upper_bound
+#if GSPH_ENABLE_SAME_CELL_PAIR_FORCE
+        , arrangement_->getNumC(),
+        arrangement_->getSameCellForceAccum()
+#endif
+        );
     if (get_detailed_time_) CUDA_SAFE_CALL(cudaEventRecord(tick_events_[3]));
 
     advance(device_buff_.get_buff_list(), nump_);
@@ -377,6 +390,9 @@ void HybridSystem::runBenchmark(int frames)
     const BenchmarkStateChecksum checksum = computeBenchmarkStateChecksum(
         host_buff_.get_buff_list().position_d,
         device_buff_.get_buff_list().position_d, nump_);
+    const int sms_task_count = arrangement_->getSmsTaskCount();
+    const SmsTaskPairStats sms_pair_stats =
+        arrangement_->getSmsTaskPairStats();
 
     std::cout << "\n========== Headless benchmark (" << measured_frames
               << " measured + " << warmup_frames
@@ -391,8 +407,20 @@ void HybridSystem::runBenchmark(int frames)
               << checksum.weighted_position << "\n";
     std::cout << std::setprecision(6);
     std::cout << "Hybrid split: " << arrangement_->getTraParticleCount()
-              << " TRA particles, " << arrangement_->getSmsTaskCount()
+              << " TRA particles, " << sms_task_count
               << " SMS tasks\n";
+    std::cout << "judgeTask isSame SMS pairs: "
+              << sms_pair_stats.is_same_pairs
+              << " / " << sms_pair_stats.total_pairs
+              << " (same-cell pairs: "
+              << sms_pair_stats.same_cell_pairs
+              << ", full: " << sms_pair_stats.full_is_same_pairs
+              << ", partial: " << sms_pair_stats.partial_is_same_pairs
+              << ", compact: "
+              << sms_pair_stats.compact_is_same_pairs
+              << ", widened: "
+              << sms_pair_stats.widened_is_same_pairs
+              << ")\n";
     std::cout << "Per-stage averages (CUDA events, warm-up frames):\n";
     std::cout << "  arrange/grid : " << (total_arrange / warmup_frames) << " ms\n";
     std::cout << "  density      : " << (total_density / warmup_frames) << " ms\n";

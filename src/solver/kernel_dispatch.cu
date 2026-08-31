@@ -185,15 +185,15 @@ struct HybridLaunchConfig {
 };
 
 HybridLaunchConfig makeHybridLaunchConfig(int tra_particle_count,
-                                          int sms_task_count,
-                                          int sms_task_bound)
+                                           int sms_task_count,
+                                           int sms_task_bound)
 {
     const int tra_block_count = ceil_int(
         tra_particle_count, kSmsBlockThreads);
 #if HYBRID_DEVICE_GRID_SIZING
     (void)sms_task_count;
-    return {tra_block_count + ceil_int(sms_task_bound, kSmsTasksPerBlock),
-            false};
+    return {tra_block_count + ceil_int(
+                sms_task_bound, kSmsTasksPerBlock), false};
 #else
     (void)sms_task_bound;
     return {tra_block_count + ceil_int(sms_task_count, kSmsTasksPerBlock),
@@ -226,8 +226,17 @@ void computeForceHybrid(
     ParticleBufferList buffers, int *compact_indices, int *cell_offsets,
     int *cell_particle_counts, const BlockTask *block_tasks, int sms_task_count,
     const int *device_sms_task_count, const int *device_middle,
-    int sms_task_upper_bound)
+    int sms_task_upper_bound
+#if GSPH_ENABLE_SAME_CELL_PAIR_FORCE
+    , int cell_count, SameCellForceAccum *same_cell_force_accum
+#endif
+    )
 {
+#if GSPH_ENABLE_SAME_CELL_PAIR_FORCE
+    launchSameCellPairForceKernel(
+        cell_count, buffers, cell_offsets, cell_particle_counts,
+        same_cell_force_accum);
+#endif
     const HybridLaunchConfig config = makeHybridLaunchConfig(
         tra_range.end - tra_range.begin, sms_task_count,
         sms_task_upper_bound);
@@ -236,7 +245,11 @@ void computeForceHybrid(
     launchForceHybridKernel(
         config.block_count, config.sms_only, micro_cell_offsets, tra_range,
         buffers, compact_indices, cell_offsets, cell_particle_counts,
-        block_tasks, device_sms_task_count, device_middle);
+        block_tasks, device_sms_task_count, device_middle
+#if GSPH_ENABLE_SAME_CELL_PAIR_FORCE
+        , same_cell_force_accum
+#endif
+        );
 }
 
 void computeOtherForceHybrid128n(ParticleIdxRange range, ParticleBufferList buff_list_n, int* cindex, int *cell_offset, int *cell_num, BlockTask *block_task, int num_block){
@@ -304,7 +317,7 @@ void advance(ParticleBufferList buff_list, int nump)
     int num_block = ceil_int(nump, num_thread);
 
 	//knIntegrateVelocitySim << <num_block, num_thread >> >(buff_list, nump);
-    knIntegrateVelocityE << <num_block, num_thread >> >(buff_list, nump);
+    knIntegrateVelocityE<<<num_block, num_thread>>>(buff_list, nump);
 
 
 }

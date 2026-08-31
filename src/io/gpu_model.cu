@@ -135,45 +135,49 @@ float knCalculateKernelClock(PTXBlockStatistic *blocks, int *times, int num_inst
 }
 
 __global__
-void knCalculateBlockRequirementHybridMode(int *cell_type, int *d_cell_num, int *block_req, GPUModel gm, int *cell_offset, int *cell_num, ushort3 grid_size, int block_size)
+void knCalculateBlockRequirementHybridMode(
+    const int *__restrict__ cell_num, int *__restrict__ block_req,
+    ushort3 grid_size)
 {
-    unsigned int idx = threadIdx.x + blockDim.x*blockIdx.x;
-    int numc = grid_size.x * grid_size.y * grid_size.z;
+    const int idx = threadIdx.x + blockDim.x * blockIdx.x;
+    const int grid_x = grid_size.x;
+    const int grid_y = grid_size.y;
+    const int slice_size = grid_x * grid_y;
+    const int numc = slice_size * grid_size.z;
     if (idx >= numc) return;
-    register int nump_self = d_cell_num[idx];
-   
-    
-    
-    register int totaln = nump_self;
-	register ushort3 self_pos = CellIdx2CellPos(idx, grid_size);
-    register int nidx = CellPos2CellIdx(self_pos + make_ushort3(-1, 0, 0), grid_size);
-    if (kInvalidCellIdx != nidx) totaln += d_cell_num[nidx];
-    nidx = CellPos2CellIdx(self_pos + make_ushort3(1, 0, 0), grid_size);
-    if (kInvalidCellIdx != nidx) totaln += d_cell_num[nidx];
-    nidx = CellPos2CellIdx(self_pos + make_ushort3(0, 1, 0), grid_size);
-    if (kInvalidCellIdx != nidx) totaln += d_cell_num[nidx];
-    nidx = CellPos2CellIdx(self_pos + make_ushort3(0, -1, 0), grid_size);
-    if (kInvalidCellIdx != nidx) totaln += d_cell_num[nidx];
-    nidx = CellPos2CellIdx(self_pos + make_ushort3(0, 0, -1), grid_size);
-    if (kInvalidCellIdx != nidx) totaln += d_cell_num[nidx];
-    nidx = CellPos2CellIdx(self_pos + make_ushort3(0, 0, 1), grid_size);
-    if (kInvalidCellIdx != nidx) totaln += d_cell_num[nidx];
-               
-    
 
-//    block_req[idx] = nump_self < 15 ? 0 : (nump_self + 25) >> 5;
+    const int nump_self = __ldg(&cell_num[idx]);
+    if (nump_self == 0)
+    {
+        block_req[idx] = 0;
+        return;
+    }
+
+    int totaln = nump_self;
+    const int x = idx % grid_x;
+    const int yz = idx / grid_x;
+    const int y = yz % grid_y;
+
+    if (x > 0) totaln += __ldg(&cell_num[idx - 1]);
+    if (x + 1 < grid_x) totaln += __ldg(&cell_num[idx + 1]);
+    if (y > 0) totaln += __ldg(&cell_num[idx - grid_x]);
+    if (y + 1 < grid_y) totaln += __ldg(&cell_num[idx + grid_x]);
+    if (idx >= slice_size)
+        totaln += __ldg(&cell_num[idx - slice_size]);
+    if (idx + slice_size < numc)
+        totaln += __ldg(&cell_num[idx + slice_size]);
+
+    // The live SMS task width is fixed at 32 particles.  Keeping that fact
+    // explicit turns both positive integer divisions into exact shifts.
     if (totaln < 96 && nump_self < 15) {
         block_req[idx] = 0;
     }
     else if (totaln < 60) {
-        block_req[idx] = (nump_self + block_size - 5) / block_size;
+        block_req[idx] = (nump_self + 27) >> 5;
     }
     else {
-        block_req[idx] = ceil_int(nump_self, block_size);
+        block_req[idx] = (nump_self + 31) >> 5;
     }
-//    if (totaln < 60){block_req[idx] = (nump_self + 25) >> 5;}else if (totaln < 95 && nump_self < 19){block_req[idx] = 0;}else{block_req[idx] = (nump_self + 31) >> 5;}
-//    block_req[idx] = (totaln < 95) ? 0 : (nump_self + 31) >> 5;
-//    block_req[idx] = 0;// (nump_self + 31) >> 5;
 }
 
 /****************************** Interface ******************************/
@@ -302,14 +306,16 @@ void calculateBlockRequirementSMSMode(int *block_req, int *cell_start, int *cell
     knCalculateBlockRequirementSMSMode<<<num_block, num_thread>>>(block_req, cell_start, cell_end, block_size, numc);
 }
 
-void calculateBlockRequirementHybridMode(int *cell_type, int *d_cell_num, int *block_req, GPUModel *gm, int *cell_offset, int *cell_num, ushort3 grid_size, int block_size)
+void calculateBlockRequirementHybridMode(
+    int *cell_num, int *block_req, ushort3 grid_size)
 {
     int numc = grid_size.x * grid_size.y * grid_size.z;
 
     int num_thread = kDefaultNumThread;
     int num_block = ceil_int(numc, num_thread);
 
-    knCalculateBlockRequirementHybridMode << <num_block, num_thread >> >(cell_type, d_cell_num, block_req, *gm, cell_offset, cell_num, grid_size, block_size);
+    knCalculateBlockRequirementHybridMode<<<num_block, num_thread>>>(
+        cell_num, block_req, grid_size);
 }
 
 }

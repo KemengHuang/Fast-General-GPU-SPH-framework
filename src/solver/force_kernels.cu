@@ -6,6 +6,139 @@
 // 0 = legacy shared-memory iterator and neighbor staging
 // 1 = register iterator state with warp-local neighbor staging
 namespace sph {
+#if GSPH_ENABLE_SAME_CELL_PAIR_FORCE
+constexpr int kSameCellPairCapacity = 512;
+
+__device__ __forceinline__ SameCellForceAccum zeroSameCellForceAccum()
+{
+    SameCellForceAccum value;
+    value.pressure = make_float3(0.0f, 0.0f, 0.0f);
+    value.viscosity = make_float3(0.0f, 0.0f, 0.0f);
+    value.gradient = make_float3(0.0f, 0.0f, 0.0f);
+    value.laplacian = 0.0f;
+    return value;
+}
+
+__device__ __forceinline__ void atomicAddSameCellForce(
+    SameCellForceAccum *target, const SameCellForceAccum& value)
+{
+    atomicAdd(&target->pressure.x, value.pressure.x);
+    atomicAdd(&target->pressure.y, value.pressure.y);
+    atomicAdd(&target->pressure.z, value.pressure.z);
+    atomicAdd(&target->viscosity.x, value.viscosity.x);
+    atomicAdd(&target->viscosity.y, value.viscosity.y);
+    atomicAdd(&target->viscosity.z, value.viscosity.z);
+    atomicAdd(&target->gradient.x, value.gradient.x);
+    atomicAdd(&target->gradient.y, value.gradient.y);
+    atomicAdd(&target->gradient.z, value.gradient.z);
+    atomicAdd(&target->laplacian, value.laplacian);
+}
+
+__device__ __forceinline__ void accumulateSameCellPair(
+    const float4& position_i, const float4& velocity_i,
+    const float4& position_j, const float4& velocity_j,
+    SameCellForceAccum *sum_i, SameCellForceAccum *sum_j)
+{
+    const float3 relative_position = cal_rePos(position_j, position_i);
+    const float distance_squared =
+        relative_position.x * relative_position.x
+        + relative_position.y * relative_position.y
+        + relative_position.z * relative_position.z;
+    if (kDevSysPara.kernel_2 < distance_squared ||
+        kFloatSmall > distance_squared)
+        return;
+
+    const float inverse_distance = rsqrtf(distance_squared);
+    const float distance = distance_squared * inverse_distance;
+    const float kernel_distance = kDevSysPara.kernel - distance;
+    const float pressure_sum = velocity_i.w + velocity_j.w;
+
+    const float weighted_kernel_i = position_j.w * kernel_distance;
+    const float pressure_weight_i =
+        weighted_kernel_i * pressure_sum * kernel_distance;
+    sum_i->pressure -= relative_position
+        * (pressure_weight_i * inverse_distance);
+
+    const float weighted_kernel_j = position_i.w * kernel_distance;
+    const float pressure_weight_j =
+        weighted_kernel_j * pressure_sum * kernel_distance;
+    sum_j->pressure += relative_position
+        * (pressure_weight_j * inverse_distance);
+
+    const float3 relative_velocity = cal_rePos(velocity_i, velocity_j);
+    sum_i->viscosity += relative_velocity * weighted_kernel_i;
+    sum_j->viscosity -= relative_velocity * weighted_kernel_j;
+
+    const float h2_r2 = kDevSysPara.kernel_2 - distance_squared;
+    const float h2_squared = h2_r2 * h2_r2;
+    sum_i->gradient += relative_position * (position_j.w * h2_squared);
+    sum_j->gradient -= relative_position * (position_i.w * h2_squared);
+
+    const float laplacian_kernel =
+        h2_r2 * (distance_squared - 0.75f * h2_r2);
+    sum_i->laplacian += position_j.w * laplacian_kernel;
+    sum_j->laplacian += position_i.w * laplacian_kernel;
+}
+
+__global__ __launch_bounds__(128)
+void computeSameCellPairForceKernel(
+    ParticleBufferList buffers, const int *__restrict__ cell_offsets,
+    const int *__restrict__ cell_particle_counts,
+    SameCellForceAccum *__restrict__ output, int cell_count)
+{
+    const int cell_id = blockIdx.x;
+    if (cell_id >= cell_count) return;
+    const int particle_count = __ldg(&cell_particle_counts[cell_id]);
+    if (particle_count <= 0 || particle_count > kSameCellPairCapacity)
+        return;
+    const int particle_begin = __ldg(&cell_offsets[cell_id]);
+
+    __shared__ float4 positions[kSameCellPairCapacity];
+    __shared__ float4 velocities[kSameCellPairCapacity];
+    __shared__ SameCellForceAccum sums[kSameCellPairCapacity];
+    for (int local_index = threadIdx.x; local_index < particle_count;
+         local_index += blockDim.x)
+    {
+        const int particle_index = particle_begin + local_index;
+        positions[local_index] = __ldg(&buffers.position_d[particle_index]);
+        velocities[local_index] = __ldg(
+            &buffers.evaluated_velocity[particle_index]);
+        sums[local_index] = zeroSameCellForceAccum();
+    }
+    __syncthreads();
+
+    for (int particle_i = threadIdx.x; particle_i < particle_count;
+         particle_i += blockDim.x)
+    {
+        SameCellForceAccum local_sum = zeroSameCellForceAccum();
+        for (int particle_j = particle_i + 1;
+             particle_j < particle_count; ++particle_j)
+        {
+            SameCellForceAccum neighbor_sum = zeroSameCellForceAccum();
+            accumulateSameCellPair(
+                positions[particle_i], velocities[particle_i],
+                positions[particle_j], velocities[particle_j],
+                &local_sum, &neighbor_sum);
+            atomicAddSameCellForce(&sums[particle_j], neighbor_sum);
+        }
+        atomicAddSameCellForce(&sums[particle_i], local_sum);
+    }
+    __syncthreads();
+
+    for (int local_index = threadIdx.x; local_index < particle_count;
+         local_index += blockDim.x)
+        output[particle_begin + local_index] = sums[local_index];
+}
+
+void launchSameCellPairForceKernel(
+    int cell_count, ParticleBufferList buffers, const int *cell_offsets,
+    const int *cell_particle_counts, SameCellForceAccum *output)
+{
+    computeSameCellPairForceKernel<<<cell_count, 128>>>(
+        buffers, cell_offsets, cell_particle_counts, output, cell_count);
+}
+#endif
+
 __device__
 inline void knComputeCellForceSMS64(const int& isSame, float3 *pres_kn, float3 *vis_kn, SimForSharedData128 *sdata, CFData *self_data, int read_num)
 {
@@ -244,14 +377,26 @@ inline void knComputeCellOtherForceSMS9_64(float3 *boundary_force, float3 *vis_k
 
 #if GSPH_USE_REGISTER_SMS
 __device__ __forceinline__
-void accumulateForceRegisterBatch(const float4 *neighbor_positions,
+void accumulateForceNeighborBatch(const float4 *neighbor_positions,
                                   const float4 *neighbor_velocities,
-                                  int warp_base, float3 *pressure_sum,
+                                  int batch_base, float3 *pressure_sum,
                                   float3 *viscosity_sum, CFData *self_data,
-                                  int neighbor_count)
+                                  int neighbor_count
+#if GSPH_ENABLE_SAME_CELL_PAIR_FORCE
+                                  , int neighbor_begin,
+                                  int self_cell_begin, int self_cell_end,
+                                  bool skip_same_cell
+#endif
+                                  )
 {
-    for (int i = warp_base; i < warp_base + neighbor_count; ++i)
+    for (int i = batch_base; i < batch_base + neighbor_count; ++i)
     {
+#if GSPH_ENABLE_SAME_CELL_PAIR_FORCE
+        const int neighbor_index = neighbor_begin + i - batch_base;
+        if (skip_same_cell && neighbor_index >= self_cell_begin &&
+            neighbor_index < self_cell_end)
+            continue;
+#endif
         float4 neighbor_position = neighbor_positions[i];
         float3 rel_pos = cal_rePos(neighbor_position, self_data->pos);
 
@@ -578,21 +723,32 @@ void knComputeOtherForceHybrid128n(ParticleIdxRange range, ParticleBufferList bu
 
 }
 template <bool kSmsOnly>
-__global__ __launch_bounds__(kSmsBlockThreads, kSmsMinBlocksPerSm)
+__global__ __launch_bounds__(kSmsBlockThreads, 14)
 void computeForceHybridKernel(
-    int *micro_cell_offsets, ParticleIdxRange tra_range,
-    ParticleBufferList buffers, int *compact_indices, int *cell_offsets,
-    int *cell_particle_counts, const BlockTask *block_tasks,
-    const int *device_sms_task_count, const int *device_middle)
+    int *__restrict__ micro_cell_offsets, ParticleIdxRange tra_range,
+    ParticleBufferList buffers, int *__restrict__ compact_indices,
+    int *__restrict__ cell_offsets,
+    int *__restrict__ cell_particle_counts,
+    const BlockTask *__restrict__ block_tasks,
+    const int *__restrict__ device_sms_task_count,
+    const int *__restrict__ device_middle
+#if GSPH_ENABLE_SAME_CELL_PAIR_FORCE
+    , const SameCellForceAccum *__restrict__ same_cell_force_accum
+#endif
+    )
 {
     int tra_block_count = 0;
     if constexpr (!kSmsOnly)
     {
         // Device-side TRA/SMS split: the host over-provisions the grid and excess
         // blocks exit immediately, so the frame needs no host readback/synchronization.
+#if HYBRID_DEVICE_GRID_SIZING
         int tra_particle_count = __ldg(device_middle);
         if (tra_particle_count < 0 || tra_particle_count > tra_range.end)
             tra_particle_count = tra_range.end;
+#else
+        const int tra_particle_count = tra_range.end;
+#endif
         tra_block_count = ceil_int(
             tra_particle_count - tra_range.begin, kSmsBlockThreads);
 
@@ -630,11 +786,11 @@ void computeForceHybridKernel(
                     neighbor_range.end - neighbor_range.begin);
             }
 
-            float3 total_force = pressure_sum * kDevSysPara.spiky_value / 2
-                + viscosity_sum * kDevSysPara.viscosity
-                * kDevSysPara.visco_value;
-            self_data.grad_color *= kDevSysPara.grad_poly6 * kDevSysPara.mass;
-            self_data.lplc_color *= kDevSysPara.lplc_poly6 * kDevSysPara.mass;
+            float3 total_force =
+                pressure_sum * kDevSysPara.half_spiky_value
+                + viscosity_sum * kDevSysPara.viscosity_visco_value;
+            self_data.grad_color *= kDevSysPara.grad_color_scale;
+            self_data.lplc_color *= kDevSysPara.lplc_color_scale;
             self_data.lplc_color *= self_data.pos.w;
 
             const float surface_normal = sqrtf(
@@ -657,17 +813,20 @@ void computeForceHybridKernel(
     {
 
         int sms_block_index = blockIdx.x - tra_block_count;
-        if (sms_block_index * kSmsTasksPerBlock >= __ldg(device_sms_task_count))
+#if HYBRID_DEVICE_GRID_SIZING
+        if (sms_block_index * kSmsTasksPerBlock >=
+            __ldg(device_sms_task_count))
             return;
-        int task_index = sms_block_index * kSmsTasksPerBlock
+#endif
+        const int first_task_index = sms_block_index * kSmsTasksPerBlock;
+        int task_index = first_task_index
             + (threadIdx.x >> 5);
         const BlockTask task = block_tasks[task_index];
 
-        int cell_id = task.cellid;
-        ushort3 cell_pos = CellIdx2CellPos(cell_id, kDevSysPara.grid_size);
+        ushort3 cell_pos = task.cell_pos;
 
-        int cell_begin = __ldg(&cell_offsets[cell_id]);
-        int cell_particle_count = __ldg(&cell_particle_counts[cell_id]);
+        const int cell_begin = task.cell_begin;
+        const int cell_particle_count = task.cell_particle_count;
         int self_idx = cell_begin + task.p_offset
             + (threadIdx.x & (kSmsTaskParticles - 1));
 
@@ -696,56 +855,149 @@ void computeForceHybridKernel(
         }
 #endif
 
-#if GSPH_USE_REGISTER_SMS
-        // Each warp owns one independent task and exchanges neighbor data only
-        // within its 32 lanes.
+#if GSPH_ENABLE_SAME_CELL_PAIR_FORCE
+        const bool same_cell_pair_handled =
+            cell_particle_count <= kSameCellPairCapacity;
+        if (same_cell_pair_handled)
         {
-            const bool warp_has_work = task.p_offset < cell_particle_count;
-            __shared__ SmsRegisterTaskIterator neighbor_iterator;
+            const int pair_self_idx = active ? self_idx : cell_end - 1;
+            const SameCellForceAccum pair_sum =
+                same_cell_force_accum[pair_self_idx];
+            pressure_sum = pair_sum.pressure;
+            viscosity_sum = pair_sum.viscosity;
+            self_data.grad_color = pair_sum.gradient;
+            self_data.lplc_color = pair_sum.laplacian;
+        }
+#endif
+
+#if GSPH_USE_REGISTER_SMS
+        // Force keeps the original per-task bounds on the register iterator
+        // by default. Cooperative consumption of historical judgeTask pairs
+        // remains an explicit A/B option because it regressed on RTX 5090.
+        {
+            __shared__ SmsNeighborIterator neighbor_iterator;
             __shared__ float4 neighbor_positions[kSmsBlockThreads];
             __shared__ float4 neighbor_velocities[kSmsBlockThreads];
-            int iterator_cell;
-            int iterator_offset;
-            int iterator_segment;
-            neighbor_iterator.initialize(
-                task.xxi, task.xxx, task.yyi, task.yyy, task.zzi, task.zzz,
-                micro_cell_offsets, cell_pos, kDevSysPara.grid_size,
-                iterator_cell, iterator_offset, iterator_segment);
+#if GSPH_ENABLE_SMS_LOCAL_MERGE && GSPH_ENABLE_SMS_LOCAL_MERGE_FORCE
+            __shared__ SmsSharedIteratorState shared_iterator_state;
+            const bool share_neighbor_space =
+                block_tasks[first_task_index].isSame != 0;
+#else
+            constexpr bool share_neighbor_space = false;
+#endif
 
-            if (warp_has_work)
+            if (share_neighbor_space)
             {
+#if GSPH_ENABLE_SMS_LOCAL_MERGE && GSPH_ENABLE_SMS_LOCAL_MERGE_FORCE
+                const unsigned int paired_bounds =
+                    block_tasks[first_task_index].paired_bounds;
+                neighbor_iterator.initializeShared(
+                    paired_bounds & 3,
+                    (paired_bounds >> 2) & 3,
+                    (paired_bounds >> 4) & 3,
+                    (paired_bounds >> 6) & 3,
+                    (paired_bounds >> 8) & 3,
+                    (paired_bounds >> 10) & 3,
+                    micro_cell_offsets,
+                    cell_pos, kDevSysPara.grid_size,
+                    shared_iterator_state);
                 while (true)
                 {
-                    const int task_lane = threadIdx.x & (kSmsTaskParticles - 1);
                     int neighbor_begin = 0;
-                    int neighbor_count = neighbor_iterator.nextBatch(
-                        micro_cell_offsets, neighbor_begin,
-                        iterator_cell, iterator_offset, iterator_segment);
+                    const int neighbor_count =
+                        neighbor_iterator.nextSharedBatch(
+                            micro_cell_offsets, neighbor_begin,
+                            shared_iterator_state);
                     if (neighbor_count == 0) break;
 
-                    if (task_lane < neighbor_count)
+                    if (threadIdx.x < neighbor_count)
                     {
-                        const int neighbor_idx = neighbor_begin + task_lane;
+                        const int neighbor_idx =
+                            neighbor_begin + threadIdx.x;
                         neighbor_positions[threadIdx.x] = __ldg(
                             &buffers.position_d[neighbor_idx]);
                         neighbor_velocities[threadIdx.x] = __ldg(
                             &buffers.evaluated_velocity[neighbor_idx]);
                     }
-                    const int task_base = threadIdx.x - task_lane;
-                    __syncwarp(kFullWarpMask);
-                    accumulateForceRegisterBatch(
-                        neighbor_positions, neighbor_velocities, task_base,
-                        &pressure_sum, &viscosity_sum, &self_data,
-                        neighbor_count);
-                    __syncwarp(kFullWarpMask);
+                    __syncthreads();
+                    if (active)
+                    {
+                        accumulateForceNeighborBatch(
+                            neighbor_positions, neighbor_velocities, 0,
+                            &pressure_sum, &viscosity_sum, &self_data,
+                            neighbor_count
+#if GSPH_ENABLE_SAME_CELL_PAIR_FORCE
+                            , neighbor_begin, cell_begin, cell_end,
+                            same_cell_pair_handled
+#endif
+                            );
+                    }
+                    __syncthreads();
+                }
+#endif
+            }
+            else
+            {
+                const bool warp_has_work =
+                    task.p_offset < cell_particle_count;
+                if (warp_has_work)
+                {
+                    int iterator_cell;
+                    int iterator_offset;
+                    int iterator_segment;
+                    neighbor_iterator.initialize(
+                        task.xxi, task.xxx, task.yyi, task.yyy,
+                        task.zzi, task.zzz, micro_cell_offsets,
+                        cell_pos, kDevSysPara.grid_size,
+                        iterator_cell, iterator_offset,
+                        iterator_segment);
+                    while (true)
+                    {
+                        const int task_lane =
+                            threadIdx.x & (kSmsTaskParticles - 1);
+                        int neighbor_begin = 0;
+                        int neighbor_count = neighbor_iterator.nextBatch(
+                            micro_cell_offsets, neighbor_begin,
+                            iterator_cell, iterator_offset,
+                            iterator_segment);
+                        if (neighbor_count == 0) break;
+
+                        if (task_lane < neighbor_count)
+                        {
+                            const int neighbor_idx =
+                                neighbor_begin + task_lane;
+                            neighbor_positions[threadIdx.x] = __ldg(
+                                &buffers.position_d[neighbor_idx]);
+                            neighbor_velocities[threadIdx.x] = __ldg(
+                                &buffers.evaluated_velocity[neighbor_idx]);
+                        }
+                        const int task_base = threadIdx.x - task_lane;
+                        __syncwarp(kFullWarpMask);
+                        accumulateForceNeighborBatch(
+                            neighbor_positions, neighbor_velocities,
+                            task_base, &pressure_sum, &viscosity_sum,
+                            &self_data, neighbor_count
+#if GSPH_ENABLE_SAME_CELL_PAIR_FORCE
+                            , neighbor_begin, cell_begin, cell_end,
+                            same_cell_pair_handled
+#endif
+                            );
+                        __syncwarp(kFullWarpMask);
+                    }
                 }
             }
         }
 #else
         // Original shared-memory SMS path for both same-cell and different-cell tasks.
-        constexpr int is_same = 0;
+        const int is_same = task.isSame;
+        const unsigned int iteration_bounds = is_same != 0
+            ? block_tasks[first_task_index].paired_bounds
+            : task.paired_bounds;
         __shared__ SimForSharedData128 shared_data;
-        shared_data.initialize(task.zzi, task.zzz, task.xxi, task.xxx,
+        shared_data.initialize((iteration_bounds >> 8) & 3,
+                               (iteration_bounds >> 10) & 3,
+                               iteration_bounds & 3,
+                               (iteration_bounds >> 2) & 3,
                                micro_cell_offsets, is_same, cell_offsets, cell_particle_counts,
                                cell_pos, kDevSysPara.grid_size);
         while (true)
@@ -766,11 +1018,12 @@ void computeForceHybridKernel(
 
         if (active)
         {
-            float3 total_force = pressure_sum * kDevSysPara.spiky_value / 2
-                + viscosity_sum * kDevSysPara.viscosity * kDevSysPara.visco_value;
+            float3 total_force =
+                pressure_sum * kDevSysPara.half_spiky_value
+                + viscosity_sum * kDevSysPara.viscosity_visco_value;
 
-            self_data.grad_color *= kDevSysPara.grad_poly6 * kDevSysPara.mass;
-            self_data.lplc_color *= kDevSysPara.lplc_poly6 * kDevSysPara.mass;
+            self_data.grad_color *= kDevSysPara.grad_color_scale;
+            self_data.lplc_color *= kDevSysPara.lplc_color_scale;
 
             // position_d.w, loaded into self_data.pos.w, stores 1/density.
             self_data.lplc_color *= self_data.pos.w;
@@ -805,21 +1058,33 @@ void launchForceHybridKernel(
     ParticleIdxRange tra_range, ParticleBufferList buffers,
     int *compact_indices, int *cell_offsets, int *cell_particle_counts,
     const BlockTask *block_tasks, const int *device_sms_task_count,
-    const int *device_middle)
+    const int *device_middle
+#if GSPH_ENABLE_SAME_CELL_PAIR_FORCE
+    , const SameCellForceAccum *same_cell_force_accum
+#endif
+    )
 {
     if (sms_only)
     {
         computeForceHybridKernel<true><<<block_count, kSmsBlockThreads>>>(
             micro_cell_offsets, tra_range, buffers, compact_indices,
             cell_offsets, cell_particle_counts, block_tasks,
-            device_sms_task_count, device_middle);
+            device_sms_task_count, device_middle
+#if GSPH_ENABLE_SAME_CELL_PAIR_FORCE
+            , same_cell_force_accum
+#endif
+            );
     }
     else
     {
         computeForceHybridKernel<false><<<block_count, kSmsBlockThreads>>>(
             micro_cell_offsets, tra_range, buffers, compact_indices,
             cell_offsets, cell_particle_counts, block_tasks,
-            device_sms_task_count, device_middle);
+            device_sms_task_count, device_middle
+#if GSPH_ENABLE_SAME_CELL_PAIR_FORCE
+            , same_cell_force_accum
+#endif
+            );
     }
 }
 }

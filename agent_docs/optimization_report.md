@@ -27,9 +27,10 @@ the `Arrangement` shutdown leak; the `knFindHybridModeMiddleValue` write race.
 ### Kernel optimizations (behavior-preserving)
 - **`__launch_bounds__(64, 10)` restored** on both hybrid kernels — validated spill-free via
   `cuobjdump -res-usage`: density 40 regs, force 57 regs, 0 stack/local.
-- **Dead `isSame == 1` branches removed** from the live kernels. The register implementation is
-  selected by default; configure with `-DGSPH_USE_REGISTER_SMS=OFF` for the legacy shared-memory
-  A/B build.
+- **The old `isSame == 1` branch was removed** from the live kernels at this stage. The historical
+  `judgeTask` behavior was later restored at the user's request; see "Historical judgeTask SMS
+  pairing" below. Configure with `-DGSPH_USE_REGISTER_SMS=OFF` for the legacy shared-memory A/B
+  build.
 - **`inv_cell_size` precomputed** (`SystemParameter::inv_cell_size`, `Arrangement::inv_cell_size_`);
   `ParticlePos2CellPos*` now multiply instead of dividing per thread. All call sites updated.
 - **Redundant `cell_offset[cell_id]` / `cell_num[cell_id]` loads hoisted** into registers in the
@@ -130,8 +131,91 @@ but only 1,174 interacting neighbors per particle/frame, explaining why storage-
 cannot plausibly produce a 1.5× whole-frame speedup without changing the neighbor algorithm.
 
 The production path is now fixed at 32 particles per task and 64 threads per block. Density and
-force share `SmsRegisterTaskIterator`; the duplicated legacy register iterator classes and the
+force share `SmsNeighborIterator`; the duplicated legacy register iterator classes and the
 obsolete `apply_reg.py`/`.register_attempt` artifacts were removed.
+
+## Historical judgeTask SMS pairing (2026-08-30)
+
+The `isSame` decision matches `origin/old` and commit `efb8c0a`. `judgeTask` examines globally
+aligned task pairs `(0,1), (2,3), ...`; matching `cellid` values are the only eligibility
+condition. It sets both descriptors to `isSame=1`, applies the historical bounds rule (second x
+maximum; second z maximum when `first.xxi == second.xxx`, otherwise z=`[0,3]`), and pads an odd
+tail. There is deliberately no search-volume threshold or alternative compatibility heuristic.
+
+The implementation now assigns one `judgeTask` thread per pair instead of launching no-op odd
+threads. The 32-byte `BlockTask` retains the original bounds, stores the six packed 2-bit pair
+bounds, and caches cell coordinates/begin/count. Density consumes the packed bounds for
+cooperative `isSame` staging; force defaults to the original bounds and an independent register
+iterator. Force staging remains available for A/B but was slower on RTX 5090.
+
+Stabilized 2×500-frame runs measured approximately 22.77 ms with density staging, 22.87 ms with
+classification/coloring but no staging, and 22.91 ms with `isSame` disabled. The small density
+gain is retained while the larger force-stage regression is removed.
+
+Enabling CMake IPO/CUDA device LTO reduced two 500-frame runs from about 22.55 ms to 22.10 ms
+(~2.0%) on RTX 5090 / CUDA 13.2. `GSPH_ENABLE_IPO=ON` is therefore the optimized-build default;
+it can be disabled for compatibility or A/B testing.
+
+The old scheduler visualization is restored as well: merged SMS particles are cyan, independent
+SMS particles are yellow, and TRA particles remain magenta.
+
+The build at that checkpoint remained spill-free on RTX 5090 / `sm_120`; later resource and
+performance numbers are superseded by the final pass below.
+
+## Final measured optimization pass (2026-08-30)
+
+The following behavior-preserving changes survived isolated A/B tests:
+
+- Precomputed scene-invariant density/force coefficients removed the per-particle reciprocal of
+  `rest_density` and repeated constant products. Two interleaved 1000-frame pairs were about 1.0%
+  faster overall.
+- The task-requirement kernel now uses linear ±x/±y/±z offsets and fixed 32-particle shifts instead
+  of repeated 3D index conversion/runtime division. Its static SASS fell from 200 to 128
+  instructions; the measured whole-frame gain was ~0.36%. Empty scheduling cells return early.
+- `CountingSort_Result_M` no longer writes a temporary coarse-cell offset that the next kernel
+  immediately reads and overwrites. Nsight Systems measured its median at 286.5 → 270.9 μs; the
+  combined sort/classification saving was about 15 μs/frame.
+- `middle_value` and SMS task count now share one device/pinned `int2`, reducing two 4-byte
+  `cudaMemcpyAsync` submissions to one 8-byte submission (~5.7 μs/frame of host API time).
+- Headless builds omit render-only `final_position` and color updates. The integration-kernel
+  median improved from 273.0 to 233.4 μs; GUI builds still generate positions and preserve
+  cyan/yellow/magenta scheduler colors.
+
+Rejected in this pass: multiplication-tree `powf_7` (neutral/slightly slower), fused task
+classification (whole-frame ~0.19% slower despite a smaller arrangement event), and a persistent
+device-sized grid (22.84–28.57 ms versus 20.74 ms for the exact-grid control). All three were
+removed from production source.
+
+Final RTX 5090 / CUDA 13.2 / native `sm_120` result, two interleaved 1000-frame runs per variant:
+
+| Variant | Mean frame | Relative throughput |
+|---|---:|---:|
+| Legacy shared iterator (`GSPH_USE_REGISTER_SMS=OFF`) | 22.901 ms | 1.000× |
+| Register iterator (`ON`, default) | **21.833 ms** | **1.0489×** |
+
+This is a measured 4.89% throughput improvement (4.66% lower frame time), not the previously
+requested 1.5×. The final headless register kernels are spill-free: mixed/SMS-only density uses
+39/38 registers and 2336 B shared; force uses 67 registers and 3328 B shared. Final Compute
+Sanitizer memcheck and synccheck runs reported zero errors for both register and shared builds.
+
+## Requested algorithm/CUB pass (2026-08-31)
+
+Four higher-risk candidates were implemented, built and measured on the same RTX 5090 default
+scene before deciding whether they belonged in production:
+
+| Candidate | Measured result | Verdict |
+|---|---:|---|
+| X-plane-aligned variable SMS tasks for tighter micro-cell bounds | tasks 130,953 → 160,692; ~24–25 ms | Reverted: partial-lane/task overhead exceeded pruning savings |
+| Same-cell particle pair computed once with shared accumulation for both particles | force ~27.7 ms; frame ~35.5 ms | Off by default: shared atomic reduction dominated |
+| One 32-thread force task per CUDA block | 22.833 vs 22.862 ms (~0.13%) and 72 regs | Reverted: noise-level gain and lower available warp count |
+| Integration writes the next frame's hash/counts | 23.242 vs 22.743 ms (~2.19% slower) | Reverted: contended atomics lengthened the integration critical path |
+
+The Thrust removal was retained. `thrust::sort`, the host round-trip `sort_by_key`, all Thrust
+headers, and stale Thrust comments were removed. CUB `DeviceScan`, `SortKeys`, and `SortPairs`
+share one persistent device temporary allocation sized once at initialization; persistent key and
+value alternates avoid runtime allocations. Interleaved 750-frame runs measured 22.792 ms after
+the change versus 22.835 ms before it (~0.19%, effectively no online regression). Final register
+and shared memcheck/synccheck runs again reported zero errors.
 
 ## Reproduce
 
@@ -144,6 +228,9 @@ build/Release/gsph.exe --benchmark 200
 ```
 
 For the shared-memory A/B build, add `-DGSPH_USE_REGISTER_SMS=OFF` at configure time.
+For isSame coloring with fully independent register traversal, add
+`-DGSPH_ENABLE_SMS_LOCAL_MERGE=OFF`. To disable classification/coloring too, add
+`-DGSPH_ENABLE_HISTORICAL_ISSAME=OFF`.
 For a build with no OpenGL/render dependencies, add `-DGSPH_HEADLESS=ON`.
 
 Register check after kernel changes:

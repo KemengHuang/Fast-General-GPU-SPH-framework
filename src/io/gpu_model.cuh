@@ -20,7 +20,8 @@ void freeGPUModel(GPUModel *gm);
 
 void calculateBlockRequirementSMSMode(int *block_req, int *cell_start, int *cell_end, int block_size, int numc);
 
-void calculateBlockRequirementHybridMode(int *cell_type, int *d_cell_num, int *block_req, GPUModel *gm, int *cell_offset, int *cell_num, ushort3 grid_size, int block_size);
+void calculateBlockRequirementHybridMode(
+    int *cell_num, int *block_req, ushort3 grid_size);
 
 }
 

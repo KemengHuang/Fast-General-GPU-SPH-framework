@@ -13,11 +13,14 @@ files. Target: Windows / VS2022 / CUDA 12.x / RTX 4090 (sm_89).
 
 | Stage | What runs |
 |---|---|
-| Arrange | `Arrangement::arrangeHybridFrame()` (`src/grid/sph_arrangement.cu`): micro-cell histogram → CUB scan → physical particle reorder → per-cell info → task requirement model → compaction index → task-offset scan → `knArrangeIndependentSmsTasks` → one scalar D2H/sync → `padIndependentSmsTasks` |
-| Density | `computeDensityHybridKernel` — one fused launch; TRA branch gathers sparse particles through `compact_indices`, while the SMS branch runs two independent 32-particle warps per 64-thread block using `SmsRegisterTaskIterator` |
-| Force | `computeForceHybridKernel` — same split and task structure; neighbor velocity is read only after the distance test passes |
-| Integrate | `knIntegrateVelocityE` |
-| Render (GUI only) | `render/particle_vbo_copy.cu` writes `final_position`/`color` directly into CUDA-registered GL VBOs. `GSPH_HEADLESS=ON` excludes this kernel and all GL code. |
+| Arrange | `Arrangement::arrangeHybridFrame()` (`src/grid/sph_arrangement.cu`): micro-cell histogram → CUB scan → physical particle reorder → per-cell info → task requirement model → compaction index → task-offset scan → `knArrangeSmsTasks` → one contiguous 8-byte D2H/sync → historical `judgeTask` pairing/padding |
+| Density | `computeDensityHybridKernel` — one fused launch; TRA gathers sparse particles through `compact_indices`; SMS uses independent register iterators except `judgeTask` `isSame` pairs, which share one 64-neighbor batch through `SmsNeighborIterator` |
+| Force | `computeForceHybridKernel` — same split and task structure; register builds use preserved original task bounds and independent warp traversal by default |
+| Integrate | `knIntegrateVelocityE`; headless builds skip the unused render-space `final_position` transform/write |
+| Render (GUI only) | `render/particle_vbo_copy.cu` writes `final_position`/`color` directly into CUDA-registered GL VBOs. `GSPH_HEADLESS=ON` excludes this kernel, all GL code, and density-pass color writes. |
+
+The original scheduler colors are retained in GUI builds: `isSame` SMS tasks are cyan,
+independent SMS tasks are yellow, and TRA particles are magenta.
 
 Neighbor search: cell size = kernel radius `h`, so 27 neighbor cells; both paths iterate 9 "rows"
 (y,z ∈ {-1,0,1}) and merge 3 x-adjacent cells into one contiguous index range (valid because the
@@ -36,13 +39,17 @@ is **dead at runtime** (~40% of the source tree).
   staging calls commented out) — now marked with `WARNING` comments; do not launch them.
 - `pcisph_kernels.cu` is 271 lines of empty stubs; the `predictionCorrectionStep*` family
   hardcodes `max_predicted_density = 1000.0f` so its convergence test degenerates.
-- `kernel_common.cuh` still contains many legacy shared-memory helper classes; the live register
-  path uses the single `SmsRegisterTaskIterator` implementation for both density and force.
+- `kernel_common.cuh` still contains many legacy shared-memory helper classes; the live path uses
+  `SmsNeighborIterator` for both warp-local register traversal and block-local shared traversal.
 
 ### `src/grid/sph_arrangement.cu` — sorting / task generation
 - ~1600 lines with ≥8 dead arrange variants and large commented debug dumps.
-- The live SMS path keeps adjacent warp tasks independent. `padIndependentSmsTasks` only creates
-  one inactive descriptor for an odd tail, and the task buffer uses an exact safe upper bound.
+- The live SMS path calls the original `judgeTask`: a globally aligned pair is marked solely when
+  both descriptors have the same `cellid`. Its optimized one-thread-per-pair implementation packs
+  the historical combined x/y/z bounds into the first descriptor without overwriting the original
+  hot bounds, and supplies a padded partner for an odd tail. No volume guard applies.
+- The 32-byte `BlockTask` caches coarse-cell coordinates, cell begin/count, particle offset, and
+  packed pair bounds so both physics passes avoid per-task division and repeated cell-array loads.
 - `gpu_model.cu` heuristic `(nump_self + 27) >> 5` under-allocates SMS tasks for cells with
   33–36 particles (tail particles keep stale density for that frame) — an upstream heuristic
   quirk, not a regression from this work.
@@ -50,7 +57,7 @@ is **dead at runtime** (~40% of the source tree).
 ### `src/particle/` — buffers
 - SoA, three `ParticleBufferObject`s: `device_buff_` (72 B/particle), `device_buff_temp_`
   (48 B, aliasing base for two fields), `host_buff_` (pinned, 44 B).
-- `position_d.w` doubles as density, `evaluated_velocity.w` as pressure (undocumented packing).
+- `position_d.w` stores reciprocal density, while `evaluated_velocity.w` stores pressure.
 - `velocity`/`acceleration`/`final_position` are 12-byte `float3` — misaligned 3-word accesses.
 
 ### `src/render/`

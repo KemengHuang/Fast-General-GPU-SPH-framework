@@ -63,6 +63,16 @@ struct SystemParameter
     float       self_density;
     float       self_lplc_color;
 
+    // Derived coefficients used by the live density/force kernels.  They are
+    // invariant for the lifetime of a scene, so compute them once on the host
+    // instead of repeating the same arithmetic for every particle.
+    float       inv_rest_density;
+    float       density_scale;
+    float       half_spiky_value;
+    float       viscosity_visco_value;
+    float       grad_color_scale;
+    float       lplc_color_scale;
+
     float3      sim_ratio;
     float3      sim_origin;
 

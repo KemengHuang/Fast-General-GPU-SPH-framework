@@ -64,6 +64,40 @@ else()
     target_compile_definitions(gsph PRIVATE GSPH_USE_REGISTER_SMS=0)
 endif()
 
+option(GSPH_ENABLE_HISTORICAL_ISSAME
+    "Run the historical judgeTask isSame classification and coloring" ON)
+if(GSPH_ENABLE_HISTORICAL_ISSAME)
+    target_compile_definitions(gsph PRIVATE
+        GSPH_ENABLE_HISTORICAL_ISSAME=1)
+else()
+    target_compile_definitions(gsph PRIVATE
+        GSPH_ENABLE_HISTORICAL_ISSAME=0)
+endif()
+option(GSPH_ENABLE_SMS_LOCAL_MERGE
+    "Use cooperative shared staging for isSame density pairs" ON)
+if(GSPH_ENABLE_SMS_LOCAL_MERGE)
+    target_compile_definitions(gsph PRIVATE GSPH_ENABLE_SMS_LOCAL_MERGE=1)
+else()
+    target_compile_definitions(gsph PRIVATE GSPH_ENABLE_SMS_LOCAL_MERGE=0)
+endif()
+option(GSPH_ENABLE_SMS_LOCAL_MERGE_FORCE
+    "Also consume judgeTask pairs in the register force pass" OFF)
+if(GSPH_ENABLE_SMS_LOCAL_MERGE_FORCE)
+    target_compile_definitions(gsph PRIVATE
+        GSPH_ENABLE_SMS_LOCAL_MERGE_FORCE=1)
+else()
+    target_compile_definitions(gsph PRIVATE
+        GSPH_ENABLE_SMS_LOCAL_MERGE_FORCE=0)
+endif()
+option(GSPH_ENABLE_SAME_CELL_PAIR_FORCE
+    "Compute same-cell force pairs once with shared accumulation" OFF)
+if(GSPH_ENABLE_SAME_CELL_PAIR_FORCE)
+    target_compile_definitions(gsph PRIVATE
+        GSPH_ENABLE_SAME_CELL_PAIR_FORCE=1)
+else()
+    target_compile_definitions(gsph PRIVATE
+        GSPH_ENABLE_SAME_CELL_PAIR_FORCE=0)
+endif()
 # The simulation headers are always visible; lodepng is a GUI-only dependency.
 target_include_directories(gsph PRIVATE
     src/
@@ -87,6 +121,13 @@ endif()
 
 # C++ and CUDA standards
 target_compile_features(gsph PRIVATE cxx_std_17 cuda_std_17)
+
+option(GSPH_ENABLE_IPO
+    "Enable host IPO and CUDA device LTO in optimized configurations" ON)
+if(GSPH_ENABLE_IPO)
+    set_property(TARGET gsph PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    set_property(TARGET gsph PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO TRUE)
+endif()
 
 # Separate device code linking
 set_target_properties(gsph PROPERTIES

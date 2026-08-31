@@ -11,10 +11,19 @@
 
 #include "particle/particle_buffer.h"
 
-namespace gpu_model { struct GPUModel; }
-
 namespace sph
 {
+
+struct SmsTaskPairStats
+{
+    int total_pairs = 0;
+    int same_cell_pairs = 0;
+    int is_same_pairs = 0;
+    int full_is_same_pairs = 0;
+    int partial_is_same_pairs = 0;
+    int compact_is_same_pairs = 0;
+    int widened_is_same_pairs = 0;
+};
 
 class Arrangement
 {
@@ -31,7 +40,11 @@ public:
     // Live per-frame arrangement path.
     void arrangeHybridFrame();
     int getSmsTaskCount() const;
+    SmsTaskPairStats getSmsTaskPairStats() const;
     const BlockTask *getSmsTasks() const;
+    SameCellForceAccum *getSameCellForceAccum() const {
+        return d_same_cell_force_accum_;
+    }
 
     int *getDevCellOffset() { return d_cell_offset_; }
     int *getDevCellOffsetM() { return d_cell_offset_M; }
@@ -83,13 +96,14 @@ private:
 
     void CSInsertParticles();
     void CSCountingSortFull();
-    void arrangeIndependentSmsTasks(
+    void arrangeSmsTasks(
         const int *hash, const int *cell_offsets,
         const int *cell_particle_counts, BlockTask *tasks,
         const int *cell_task_counts, const int *cell_task_offsets);
     void arrangeBlockTasksFixed(BlockTask* d_task_array, int* d_cta_reqs,
                                 int* d_task_array_offset, int cta_size);
     void arrangeBlockTasksFloat();
+    void allocateCubTempStorage();
 
     void CSCalculateRequiredCTAsFixed(int *cat_offset, int* d_cta_reqs, int cta_size);
 
@@ -103,11 +117,13 @@ private:
     ushort3 grid_size_;
     int middle_value_ = 0;
     int* h_middle_value_pinned_ = nullptr; // [1] pinned host buffer for async D2H of middle_value_
+    int* h_hybrid_counts_pinned_ = nullptr; // [2] contiguous middle/task-count readback
 
     int  h_num_cta_ = 0;
     int* h_num_cta_pinned_ = nullptr;      // [1] pinned host buffer for async D2H of d_num_cta_
 
     int* d_num_cta_;
+    int* d_hybrid_counts_ = nullptr; // [2]: middle value, SMS task count
     int* d_cell_offset_;            // [numc] the offset in memory of the particles in each cell
     int* d_cell_nump_;              // [numc] the number of particles in each cell
     int* d_p_offset_;
@@ -120,6 +136,7 @@ private:
     int *d_end_index_;              // [numc]device buffer, cell end index
     int *d_hash_;                   // [nump]
     int *d_index_;                  // [nump]
+    int *d_index_alt_;              // persistent CUB SortPairs value output
     
     int *hashp;                   // [nump]
 	int *d_hash_p;                   // [nump]
@@ -137,15 +154,15 @@ private:
     int *d_num_block_;              // [1]
     int h_num_block_ = 0;
     BlockTask *d_block_task_;       // [numb]
+    SameCellForceAccum *d_same_cell_force_accum_ = nullptr;
     
     int *d_middle_value_;           // [1]for Hybrid Mode
 
 
-    // Persistent CUB device-scan temporary storage (replaces per-frame thrust allocations).
-    void *d_cub_scan_temp_ = nullptr;
-    size_t cub_scan_temp_bytes_ = 0;
+    // One persistent device allocation shared by CUB scans and radix sorts.
+    void *d_cub_temp_ = nullptr;
+    size_t cub_temp_bytes_ = 0;
 
-    gpu_model::GPUModel *p_gpu_model_ = nullptr;
 };
 
 }

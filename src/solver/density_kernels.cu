@@ -277,14 +277,14 @@ void knComputeMixDensityTRA(ParticleBufferList buff_list, int *cell_offset, int 
 
 #if GSPH_USE_REGISTER_SMS
 __device__ __forceinline__
-void accumulateDensityRegisterBatch(const float4 *neighbor_positions,
-                                    int warp_base, CDAPData *self_data,
+void accumulateDensityNeighborBatch(const float4 *neighbor_positions,
+                                    int batch_base, CDAPData *self_data,
                                     int neighbor_count)
 {
     #pragma unroll 4
     for (int src = 0; src < neighbor_count; ++src)
     {
-        float4 neighbor_position = neighbor_positions[warp_base + src];
+        float4 neighbor_position = neighbor_positions[batch_base + src];
         float dis_2 = distance_square(self_data->pos, neighbor_position);
         if (kDevSysPara.kernel_2 < dis_2 || kFloatSmall > dis_2)
             continue;
@@ -295,21 +295,28 @@ void accumulateDensityRegisterBatch(const float4 *neighbor_positions,
 #endif
 
 template <bool kSmsOnly>
-__global__ __launch_bounds__(kSmsBlockThreads, kSmsMinBlocksPerSm)
+__global__ __launch_bounds__(kSmsBlockThreads, 24)
 void computeDensityHybridKernel(
-    int *micro_cell_offsets, ParticleIdxRange tra_range,
-    ParticleBufferList buffers, int *compact_indices, int *cell_offsets,
-    int *cell_particle_counts, const BlockTask *block_tasks,
-    const int *device_sms_task_count, const int *device_middle)
+    int *__restrict__ micro_cell_offsets, ParticleIdxRange tra_range,
+    ParticleBufferList buffers, int *__restrict__ compact_indices,
+    int *__restrict__ cell_offsets,
+    int *__restrict__ cell_particle_counts,
+    const BlockTask *__restrict__ block_tasks,
+    const int *__restrict__ device_sms_task_count,
+    const int *__restrict__ device_middle)
 {
     int tra_block_count = 0;
     if constexpr (!kSmsOnly)
     {
         // Device-side TRA/SMS split: the host over-provisions the grid and excess
         // blocks exit immediately, so the frame needs no host readback/synchronization.
+#if HYBRID_DEVICE_GRID_SIZING
         int tra_particle_count = __ldg(device_middle);
         if (tra_particle_count < 0 || tra_particle_count > tra_range.end)
             tra_particle_count = tra_range.end;
+#else
+        const int tra_particle_count = tra_range.end;
+#endif
         tra_block_count = ceil_int(
             tra_particle_count - tra_range.begin, kSmsBlockThreads);
 
@@ -342,35 +349,40 @@ void computeDensityHybridKernel(
                     neighbor_range.end - neighbor_range.begin);
             }
 
-            self_data.pos.w *= kDevSysPara.mass * kDevSysPara.poly6_value;
+            self_data.pos.w *= kDevSysPara.density_scale;
             self_data.pos.w += kDevSysPara.self_density;
             buffers.position_d[self_idx].w =
                 __fdividef(1.0f, self_data.pos.w);
             buffers.evaluated_velocity[self_idx].w =
-                (powf_7(__fdividef(
-                    self_data.pos.w, kDevSysPara.rest_density)) - 1)
+                (powf_7(self_data.pos.w
+                    * kDevSysPara.inv_rest_density) - 1)
                 * kDevSysPara.gas_constant;
 
+#if !GSPH_HEADLESS
             const float density_color = (5000 - self_data.pos.w) / 6000;
             buffers.color[self_idx] =
                 COLORA(density_color, 0.0f, density_color, 1.0f);
+#endif
             return;
         }
     }
     {
 
         int sms_block_index = blockIdx.x - tra_block_count;
-        if (sms_block_index * kSmsTasksPerBlock >= __ldg(device_sms_task_count))
+#if HYBRID_DEVICE_GRID_SIZING
+        if (sms_block_index * kSmsTasksPerBlock >=
+            __ldg(device_sms_task_count))
             return;
-        int task_index = sms_block_index * kSmsTasksPerBlock
+#endif
+        const int first_task_index = sms_block_index * kSmsTasksPerBlock;
+        int task_index = first_task_index
             + (threadIdx.x >> 5);
         const BlockTask task = block_tasks[task_index];
 
-        int cell_id = task.cellid;
-        ushort3 cell_pos = CellIdx2CellPos(cell_id, kDevSysPara.grid_size);
+        ushort3 cell_pos = task.cell_pos;
 
-        int cell_begin = __ldg(&cell_offsets[cell_id]);
-        int cell_particle_count = __ldg(&cell_particle_counts[cell_id]);
+        const int cell_begin = task.cell_begin;
+        const int cell_particle_count = task.cell_particle_count;
         int self_idx = cell_begin + task.p_offset
             + (threadIdx.x & (kSmsTaskParticles - 1));
 
@@ -396,50 +408,114 @@ void computeDensityHybridKernel(
 #endif
 
 #if GSPH_USE_REGISTER_SMS
-        // Each warp owns one independent task and exchanges neighbor data only
-        // within its 32 lanes.
+        // Keep independent tasks on the register iterator. If the historical
+        // judgeTask policy marks a same-cell pair, use the combined bounds in
+        // its first descriptor and let both warps consume one shared batch.
         {
-            // A warp whose p_offset is past the cell has no self-particles.
-            // All threads still participate in initialize() because it uses
-            // __syncthreads(), but the empty warp can skip the iteration loop.
-            const bool warp_has_work = task.p_offset < cell_particle_count;
-
-            __shared__ SmsRegisterTaskIterator neighbor_iterator;
-            int iterator_cell;
-            int iterator_offset;
-            int iterator_segment;
-            neighbor_iterator.initialize(
-                task.xxi, task.xxx, task.yyi, task.yyy, task.zzi, task.zzz,
-                micro_cell_offsets, cell_pos, kDevSysPara.grid_size,
-                iterator_cell, iterator_offset, iterator_segment);
+            __shared__ SmsNeighborIterator neighbor_iterator;
             __shared__ float4 neighbor_positions[kSmsBlockThreads];
-            if (warp_has_work)
+#if GSPH_ENABLE_SMS_LOCAL_MERGE
+            __shared__ SmsSharedIteratorState shared_iterator_state;
+            const bool share_neighbor_space =
+                block_tasks[first_task_index].isSame != 0;
+#else
+            constexpr bool share_neighbor_space = false;
+#endif
+
+            if (share_neighbor_space)
             {
+#if GSPH_ENABLE_SMS_LOCAL_MERGE
+                const unsigned int paired_bounds =
+                    block_tasks[first_task_index].paired_bounds;
+                neighbor_iterator.initializeShared(
+                    paired_bounds & 3,
+                    (paired_bounds >> 2) & 3,
+                    (paired_bounds >> 4) & 3,
+                    (paired_bounds >> 6) & 3,
+                    (paired_bounds >> 8) & 3,
+                    (paired_bounds >> 10) & 3,
+                    micro_cell_offsets,
+                    cell_pos, kDevSysPara.grid_size,
+                    shared_iterator_state);
                 while (true)
                 {
-                    const int task_lane = threadIdx.x & (kSmsTaskParticles - 1);
                     int neighbor_begin = 0;
-                    int neighbor_count = neighbor_iterator.nextBatch(
-                        micro_cell_offsets, neighbor_begin,
-                        iterator_cell, iterator_offset, iterator_segment);
+                    const int neighbor_count =
+                        neighbor_iterator.nextSharedBatch(
+                            micro_cell_offsets, neighbor_begin,
+                            shared_iterator_state);
                     if (neighbor_count == 0) break;
-                    if (task_lane < neighbor_count)
+
+                    if (threadIdx.x < neighbor_count)
                     {
                         neighbor_positions[threadIdx.x] = __ldg(
-                            &buffers.position_d[neighbor_begin + task_lane]);
+                            &buffers.position_d[
+                                neighbor_begin + threadIdx.x]);
                     }
-                    const int task_base = threadIdx.x - task_lane;
-                    __syncwarp(kFullWarpMask);
-                    accumulateDensityRegisterBatch(neighbor_positions, task_base, &self_data, neighbor_count);
-                    __syncwarp(kFullWarpMask);
+                    __syncthreads();
+                    if (active)
+                    {
+                        accumulateDensityNeighborBatch(
+                            neighbor_positions, 0, &self_data,
+                            neighbor_count);
+                    }
+                    __syncthreads();
+                }
+#endif
+            }
+            else
+            {
+                // A warp whose p_offset is past the cell has no self-particles.
+                const bool warp_has_work =
+                    task.p_offset < cell_particle_count;
+                if (warp_has_work)
+                {
+                    int iterator_cell;
+                    int iterator_offset;
+                    int iterator_segment;
+                    neighbor_iterator.initialize(
+                        task.xxi, task.xxx, task.yyi, task.yyy,
+                        task.zzi, task.zzz, micro_cell_offsets,
+                        cell_pos, kDevSysPara.grid_size,
+                        iterator_cell, iterator_offset,
+                        iterator_segment);
+                    while (true)
+                    {
+                        const int task_lane =
+                            threadIdx.x & (kSmsTaskParticles - 1);
+                        int neighbor_begin = 0;
+                        int neighbor_count = neighbor_iterator.nextBatch(
+                            micro_cell_offsets, neighbor_begin,
+                            iterator_cell, iterator_offset,
+                            iterator_segment);
+                        if (neighbor_count == 0) break;
+                        if (task_lane < neighbor_count)
+                        {
+                            neighbor_positions[threadIdx.x] = __ldg(
+                                &buffers.position_d[
+                                    neighbor_begin + task_lane]);
+                        }
+                        const int task_base = threadIdx.x - task_lane;
+                        __syncwarp(kFullWarpMask);
+                        accumulateDensityNeighborBatch(
+                            neighbor_positions, task_base, &self_data,
+                            neighbor_count);
+                        __syncwarp(kFullWarpMask);
+                    }
                 }
             }
         }
 #else
         // Original shared-memory SMS path for both same-cell and different-cell tasks.
-        constexpr int is_same = 0;
+        const int is_same = task.isSame;
+        const unsigned int iteration_bounds = is_same != 0
+            ? block_tasks[first_task_index].paired_bounds
+            : task.paired_bounds;
         __shared__ SimDenSharedData128 shared_data;
-        shared_data.initialize(task.zzi, task.zzz, task.xxi, task.xxx,
+        shared_data.initialize((iteration_bounds >> 8) & 3,
+                               (iteration_bounds >> 10) & 3,
+                               iteration_bounds & 3,
+                               (iteration_bounds >> 2) & 3,
                                micro_cell_offsets, is_same, cell_offsets, cell_particle_counts,
                                cell_pos, kDevSysPara.grid_size);
         while (true)
@@ -459,18 +535,31 @@ void computeDensityHybridKernel(
 
         if (active)
         {
-            self_data.pos.w *= kDevSysPara.mass * kDevSysPara.poly6_value;
+            self_data.pos.w *= kDevSysPara.density_scale;
             self_data.pos.w += kDevSysPara.self_density;
             float stored_density = self_data.pos.w < kFloatSmall ? kDevSysPara.rest_density : self_data.pos.w;
             buffers.position_d[self_idx].w = __fdividef(1.0f, stored_density);  // position_d.w stores 1/density
             buffers.evaluated_velocity[self_idx].w =
-                (powf_7(__fdividef(
-                    self_data.pos.w, kDevSysPara.rest_density)) - 1)
+                (powf_7(self_data.pos.w
+                    * kDevSysPara.inv_rest_density) - 1)
                 * kDevSysPara.gas_constant;
 
-            float density_color = (5000 - self_data.pos.w) / 6000;
-            buffers.color[self_idx] = COLORA(
-                density_color, density_color, 0.0f, 1.0f);
+#if !GSPH_HEADLESS
+            const float density_color =
+                (5000 - self_data.pos.w) / 6000;
+            if (task.isSame != 0)
+            {
+                // Historical merged-task color: cyan.
+                buffers.color[self_idx] = COLORA(
+                    0.0f, density_color, density_color, 1.0f);
+            }
+            else
+            {
+                // Historical independent-task color: yellow.
+                buffers.color[self_idx] = COLORA(
+                    density_color, density_color, 0.0f, 1.0f);
+            }
+#endif
         }
     }
 }

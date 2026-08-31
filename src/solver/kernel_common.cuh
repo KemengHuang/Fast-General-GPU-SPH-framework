@@ -48,7 +48,10 @@ __device__ __host__
 inline float powf_3(float base) { return base * base * base; }
 
 __device__ __host__
-inline float powf_7(float base) { return base * base * base * base * base * base * base; }
+inline float powf_7(float base)
+{
+    return base * base * base * base * base * base * base;
+}
 
 typedef unsigned int uint;
 
@@ -514,7 +517,16 @@ private:
 	char iminz[rate];
 	char imaxz[rate];
 };
-class SmsRegisterTaskIterator
+struct SmsSharedIteratorState
+{
+    int iterator_cell;
+    int iterator_offset;
+    int iterator_segment;
+    int neighbor_begin;
+    int neighbor_count;
+};
+
+class SmsNeighborIterator
 {
 public:
     static constexpr int kNeighborRowCount = 9;
@@ -533,56 +545,11 @@ public:
              neighbor_slot < kNeighborRowCount;
              neighbor_slot += kSmsTaskParticles)
         {
-            const int y_offset = neighbor_slot % 3 - 1;
-            const int z_offset = neighbor_slot / 3 - 1;
-            ushort3 neighbor_cell = cell_pos + make_ushort3(-1, y_offset, z_offset);
-            int left_cell_id = CellPos2CellIdx(neighbor_cell, grid_size);
-            ++neighbor_cell.x;
-            int middle_cell_id = CellPos2CellIdx(neighbor_cell, grid_size);
-            ++neighbor_cell.x;
-            int right_cell_id = CellPos2CellIdx(neighbor_cell, grid_size);
             const int metadata_index = metadata_base + neighbor_slot;
-
-            if (middle_cell_id == kInvalidCellIdx)
-            {
-                micro_cell_begin_[metadata_index] = 0;
-                candidate_particle_count_[metadata_index] = 0;
-                x_count_[metadata_index] = 0;
-                z_begin_[metadata_index] = 0;
-                z_count_[metadata_index] = 0;
-                y_begin_[metadata_index] = 0;
-                y_count_[metadata_index] = 0;
-                requires_segmentation_[metadata_index] = 0;
-            }
-            else
-            {
-                const int left_count = left_cell_id == kInvalidCellIdx ? 0 : 4 - min_x;
-                const int right_count = right_cell_id == kInvalidCellIdx ? 0 : max_x + 1;
-                const int x_count = left_count + 4 + right_count;
-                const int micro_cell_begin = left_cell_id == kInvalidCellIdx
-                    ? (middle_cell_id << 6)
-                    : (left_cell_id << 6) + (min_x << 4);
-
-                const int y_begin = y_offset < 0 ? min_y : 0;
-                const int y_end = y_offset > 0 ? max_y : 3;
-                const int z_begin = z_offset < 0 ? min_z : 0;
-                const int z_end = z_offset > 0 ? max_z : 3;
-
-                micro_cell_begin_[metadata_index] = micro_cell_begin;
-                candidate_particle_count_[metadata_index] =
-                    __ldg(&micro_cell_offsets[
-                        micro_cell_begin + (x_count << 4)]) -
-                    __ldg(&micro_cell_offsets[micro_cell_begin]);
-                x_count_[metadata_index] = static_cast<unsigned char>(x_count);
-                z_begin_[metadata_index] = static_cast<unsigned char>(z_begin);
-                z_count_[metadata_index] = static_cast<unsigned char>(z_end - z_begin + 1);
-                y_begin_[metadata_index] = static_cast<unsigned char>(y_begin);
-                y_count_[metadata_index] = static_cast<unsigned char>(y_end - y_begin + 1);
-                requires_segmentation_[metadata_index] =
-                    static_cast<unsigned char>(
-                        y_begin != 0 || y_end != 3 ||
-                        z_begin != 0 || z_end != 3);
-            }
+            initializeMetadataSlot(
+                neighbor_slot, metadata_index,
+                min_x, max_x, min_y, max_y, min_z, max_z,
+                micro_cell_offsets, cell_pos, grid_size);
         }
 
         iterator_cell = metadata_base;
@@ -591,12 +558,127 @@ public:
         __syncwarp(kFullWarpMask);
     }
 
+    __device__ __forceinline__ void initializeShared(
+        int min_x, int max_x, int min_y, int max_y, int min_z, int max_z,
+        const int *micro_cell_offsets, const ushort3 &cell_pos,
+        const ushort3 &grid_size, SmsSharedIteratorState& state)
+    {
+        const int block_lane = threadIdx.x;
+        if (block_lane < kNeighborRowCount)
+        {
+            initializeMetadataSlot(
+                block_lane, block_lane,
+                min_x, max_x, min_y, max_y, min_z, max_z,
+                micro_cell_offsets, cell_pos, grid_size);
+        }
+        if (block_lane == 0)
+        {
+            state.iterator_cell = 0;
+            state.iterator_offset = 0;
+            state.iterator_segment = 0;
+            state.neighbor_begin = 0;
+            state.neighbor_count = 0;
+        }
+        __syncthreads();
+    }
+
     __device__ __forceinline__ int nextBatch(
         const int *micro_cell_offsets, int& neighbor_begin,
         int& iterator_cell, int& iterator_offset, int& iterator_segment)
     {
         const int metadata_end =
             ((threadIdx.x >> 5) + 1) * kNeighborRowCount;
+        return advanceBatch<kSmsTaskParticles>(
+            micro_cell_offsets, neighbor_begin,
+            iterator_cell, iterator_offset, iterator_segment,
+            metadata_end);
+    }
+
+    __device__ __forceinline__ int nextSharedBatch(
+        const int *micro_cell_offsets, int& neighbor_begin,
+        SmsSharedIteratorState& state)
+    {
+        if (threadIdx.x == 0)
+        {
+            state.neighbor_count = advanceBatch<kSmsBlockThreads>(
+                micro_cell_offsets, state.neighbor_begin,
+                state.iterator_cell, state.iterator_offset,
+                state.iterator_segment, kNeighborRowCount);
+        }
+        __syncthreads();
+        neighbor_begin = state.neighbor_begin;
+        return state.neighbor_count;
+    }
+
+private:
+    __device__ __forceinline__ void initializeMetadataSlot(
+        int neighbor_slot, int metadata_index,
+        int min_x, int max_x, int min_y, int max_y, int min_z, int max_z,
+        const int *micro_cell_offsets, const ushort3 &cell_pos,
+        const ushort3 &grid_size)
+    {
+        const int y_offset = neighbor_slot % 3 - 1;
+        const int z_offset = neighbor_slot / 3 - 1;
+        ushort3 neighbor_cell =
+            cell_pos + make_ushort3(-1, y_offset, z_offset);
+        int left_cell_id = CellPos2CellIdx(neighbor_cell, grid_size);
+        ++neighbor_cell.x;
+        const int middle_cell_id = CellPos2CellIdx(neighbor_cell, grid_size);
+        ++neighbor_cell.x;
+        const int right_cell_id = CellPos2CellIdx(neighbor_cell, grid_size);
+
+        if (middle_cell_id == kInvalidCellIdx)
+        {
+            micro_cell_begin_[metadata_index] = 0;
+            candidate_particle_count_[metadata_index] = 0;
+            x_count_[metadata_index] = 0;
+            z_begin_[metadata_index] = 0;
+            z_count_[metadata_index] = 0;
+            y_begin_[metadata_index] = 0;
+            y_count_[metadata_index] = 0;
+            requires_segmentation_[metadata_index] = 0;
+            return;
+        }
+
+        const int left_count =
+            left_cell_id == kInvalidCellIdx ? 0 : 4 - min_x;
+        const int right_count =
+            right_cell_id == kInvalidCellIdx ? 0 : max_x + 1;
+        const int neighbor_x_count = left_count + 4 + right_count;
+        const int micro_cell_begin = left_cell_id == kInvalidCellIdx
+            ? (middle_cell_id << 6)
+            : (left_cell_id << 6) + (min_x << 4);
+
+        const int y_begin = y_offset < 0 ? min_y : 0;
+        const int y_end = y_offset > 0 ? max_y : 3;
+        const int z_begin = z_offset < 0 ? min_z : 0;
+        const int z_end = z_offset > 0 ? max_z : 3;
+
+        micro_cell_begin_[metadata_index] = micro_cell_begin;
+        candidate_particle_count_[metadata_index] =
+            __ldg(&micro_cell_offsets[
+                micro_cell_begin + (neighbor_x_count << 4)]) -
+            __ldg(&micro_cell_offsets[micro_cell_begin]);
+        x_count_[metadata_index] =
+            static_cast<unsigned char>(neighbor_x_count);
+        z_begin_[metadata_index] = static_cast<unsigned char>(z_begin);
+        z_count_[metadata_index] =
+            static_cast<unsigned char>(z_end - z_begin + 1);
+        y_begin_[metadata_index] = static_cast<unsigned char>(y_begin);
+        y_count_[metadata_index] =
+            static_cast<unsigned char>(y_end - y_begin + 1);
+        requires_segmentation_[metadata_index] =
+            static_cast<unsigned char>(
+                y_begin != 0 || y_end != 3 ||
+                z_begin != 0 || z_end != 3);
+    }
+
+    template <int kBatchSize>
+    __device__ __forceinline__ int advanceBatch(
+        const int *micro_cell_offsets, int& neighbor_begin,
+        int& iterator_cell, int& iterator_offset, int& iterator_segment,
+        int metadata_end)
+    {
 
         while (iterator_cell < metadata_end)
         {
@@ -614,13 +696,13 @@ public:
             if (requires_segmentation_[iterator_cell] == 0)
             {
                 const int remaining = candidate_count - iterator_offset;
-                const int neighbor_count = remaining > kSmsTaskParticles
-                    ? kSmsTaskParticles : remaining;
+                const int neighbor_count = remaining > kBatchSize
+                    ? kBatchSize : remaining;
                 neighbor_begin = __ldg(&micro_cell_offsets[micro_cell_begin])
                     + iterator_offset;
-                if (remaining > kSmsTaskParticles)
+                if (remaining > kBatchSize)
                 {
-                    iterator_offset += kSmsTaskParticles;
+                    iterator_offset += kBatchSize;
                 }
                 else
                 {
@@ -671,12 +753,12 @@ public:
                     continue;
                 }
 
-                const int neighbor_count = remaining > kSmsTaskParticles
-                    ? kSmsTaskParticles : remaining;
+                const int neighbor_count = remaining > kBatchSize
+                    ? kBatchSize : remaining;
                 neighbor_begin = particle_begin + iterator_offset;
-                if (remaining > kSmsTaskParticles)
+                if (remaining > kBatchSize)
                 {
-                    iterator_offset += kSmsTaskParticles;
+                    iterator_offset += kBatchSize;
                 }
                 else
                 {
@@ -693,7 +775,6 @@ public:
         return 0;
     }
 
-private:
     int micro_cell_begin_[kNeighborRowCount * kSmsTasksPerBlock];
     int candidate_particle_count_[kNeighborRowCount * kSmsTasksPerBlock];
     unsigned char x_count_[kNeighborRowCount * kSmsTasksPerBlock];

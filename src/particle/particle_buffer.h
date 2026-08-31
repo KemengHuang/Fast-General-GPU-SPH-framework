@@ -53,11 +53,17 @@ struct mixPressure {
 enum condition { FLUID, SOLID };
 
 // Bit-packed block task used by the grid scheduler.
-// xxi/xxx, yyi/yyy, zzi/zzz encode whether the neighbor cell offset is -1, 0 or +1
-// along each axis and whether the current block is the same cell as the neighbor.
+// xxi/xxx, yyi/yyy, zzi/zzz bound the task's local micro-cell coordinates.
+// isSame is assigned by the historical judgeTask same-cell pairing policy.
+// For a paired block, the first descriptor stores the combined search bounds
+// in paired_bounds while its hot x/y/z fields retain the original task bounds.
 struct BlockTask {
     char isSame;
+    // Six 2-bit paired bounds fit in padding that precedes cellid. The hot
+    // x/y/z fields stay original; cached cell metadata brings the task to 32 B.
+    unsigned short paired_bounds;
     int cellid;
+    ushort3 cell_pos;
     unsigned short p_offset;
     char xxi;
     char xxx;
@@ -65,7 +71,28 @@ struct BlockTask {
     char yyy;
     char zzi;
     char zzz;
+    int cell_begin;
+    int cell_particle_count;
 };
+
+struct SameCellForceAccum
+{
+    float3 pressure;
+    float3 viscosity;
+    float3 gradient;
+    float laplacian;
+};
+
+static_assert(sizeof(BlockTask) == 32,
+              "Unexpected BlockTask layout");
+
+__host__ __device__ inline unsigned short packSmsTaskBounds(
+    int min_x, int max_x, int min_y, int max_y, int min_z, int max_z)
+{
+    return static_cast<unsigned short>(
+        min_x | (max_x << 2) | (min_y << 4) |
+        (max_y << 6) | (min_z << 8) | (max_z << 10));
+}
 
 enum BufferType {
     kBuffTypeNone,
@@ -87,12 +114,12 @@ struct ParticleIdxRange {
 };
 
 struct ParticleBufferList {
-    float4* position_d;
-    float4* evaluated_velocity;
-    float3* velocity;
-    float3* acceleration;
+    float4* __restrict__ position_d;
+    float4* __restrict__ evaluated_velocity;
+    float3* __restrict__ velocity;
+    float3* __restrict__ acceleration;
 
-    float3* final_position;
+    float3* __restrict__ final_position;
 
     // PCI-SPH fields
     float3* predicted_pos;
@@ -102,7 +129,7 @@ struct ParticleBufferList {
     float* densityError;
     float* correction_pressure;
 
-    unsigned int* color;
+    unsigned int* __restrict__ color;
     condition* phase;   // particle phase/type
 
     Vlmfraction* vlfrt;

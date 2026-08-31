@@ -76,7 +76,11 @@ void computeForceHybrid(
     ParticleBufferList buffers, int *compact_indices, int *cell_offsets,
     int *cell_particle_counts, const BlockTask *block_tasks, int sms_task_count,
     const int *device_sms_task_count, const int *device_middle,
-    int sms_task_upper_bound);
+    int sms_task_upper_bound
+#if GSPH_ENABLE_SAME_CELL_PAIR_FORCE
+    , int cell_count, SameCellForceAccum *same_cell_force_accum
+#endif
+    );
 
 void computeForceSMS(ParticleBufferList buff_list, int *cell_offset, int *cell_num, BlockTask *block_task, int num_block);
 
